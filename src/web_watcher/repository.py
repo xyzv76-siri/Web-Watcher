@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional
 
-from .models import Entity, FetchState, Signal
+from .models import Entity, Event, FetchState, Signal
 from .storage import initialize_schema, open_database
 
 
@@ -24,6 +24,10 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _fallback_datetime() -> datetime:
+    return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -180,6 +184,195 @@ class Repository:
                 (entity_id,),
             ).fetchone()
         return int(row["cnt"]) if row else 0
+
+    # ------------------------------------------------------------------
+    # Events
+    # ------------------------------------------------------------------
+
+    def create_event(
+        self,
+        entity_id: int,
+        event_type: str,
+        status: str = "open",
+        importance: str = "medium",
+        created_at: Optional[datetime] = None,
+    ) -> Event:
+        """Create a new Event for the given entity."""
+        now = created_at or utc_now()
+        now_iso = now.isoformat()
+
+        cursor = self.connection.execute(
+            """
+            INSERT INTO events
+                (entity_id, event_type, status, importance, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (entity_id, event_type, status, importance, now_iso, now_iso),
+        )
+        self.connection.commit()
+
+        return Event(
+            id=cursor.lastrowid,
+            entity_id=entity_id,
+            event_type=event_type,
+            status=status,
+            importance=importance,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def get_event(self, event_id: int) -> Optional[Event]:
+        """Return the Event with *event_id*, or None."""
+        row = self.connection.execute(
+            "SELECT id, entity_id, event_type, status, importance, created_at, updated_at FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        return Event(
+            id=row[0],
+            entity_id=row[1],
+            event_type=row[2],
+            status=row[3],
+            importance=row[4],
+            created_at=_parse_iso_datetime(row[5]) or _fallback_datetime(),
+            updated_at=_parse_iso_datetime(row[6]) or _fallback_datetime(),
+        )
+
+    def update_event(
+        self,
+        event_id: int,
+        status: Optional[str] = None,
+        importance: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> Optional[Event]:
+        """Update selected fields of an existing Event.
+
+        Returns the updated Event or None if not found.
+        """
+        existing = self.get_event(event_id)
+        if existing is None:
+            return None
+
+        new_status = status if status is not None else existing.status
+        new_importance = importance if importance is not None else existing.importance
+        now = updated_at or utc_now()
+
+        self.connection.execute(
+            """
+            UPDATE events
+            SET status = ?, importance = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (new_status, new_importance, now.isoformat(), event_id),
+        )
+        self.connection.commit()
+
+        return Event(
+            id=existing.id,
+            entity_id=existing.entity_id,
+            event_type=existing.event_type,
+            status=new_status,
+            importance=new_importance,
+            created_at=existing.created_at,
+            updated_at=now,
+        )
+
+    def attach_signal_to_event(
+        self,
+        event_id: int,
+        signal_id: int,
+    ) -> bool:
+        """Link a Signal to an Event via the event_signals junction table.
+
+        Returns True on success, False if the pair already exists.
+        """
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO event_signals (event_id, signal_id)
+                VALUES (?, ?)
+                """,
+                (event_id, signal_id),
+            )
+            self.connection.commit()
+            return True
+        except sqlite3.IntegrityError:
+            self.connection.rollback()
+            return False
+
+    def get_event_signals(self, event_id: int) -> list[Signal]:
+        """Return all Signals attached to *event_id*."""
+        rows = self.connection.execute(
+            """
+            SELECT s.id, s.entity_id, s.signal_type, s.observed_at, s.value, s.fingerprint
+            FROM signals s
+            JOIN event_signals es ON es.signal_id = s.id
+            WHERE es.event_id = ?
+            ORDER BY s.observed_at ASC
+            """,
+            (event_id,),
+        ).fetchall()
+
+        return [
+            Signal(
+                id=r["id"],
+                entity_id=r["entity_id"],
+                signal_type=r["signal_type"],
+                observed_at=_parse_iso_datetime(r["observed_at"]) or _fallback_datetime(),
+                value=r["value"],
+                fingerprint=r["fingerprint"],
+            )
+            for r in rows
+        ]
+
+    def find_open_event_for_entity(
+        self,
+        entity_id: int,
+        cutoff: Optional[datetime] = None,
+    ) -> Optional[Event]:
+        """Find the most recent *open* Event for *entity_id* created on or after *cutoff*.
+
+        If *cutoff* is None, no time filter is applied.
+        Returns the Event with the latest created_at among matches, or None.
+        """
+        if cutoff is not None:
+            cutoff_str = cutoff.isoformat()
+            row = self.connection.execute(
+                """
+                SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                FROM events
+                WHERE entity_id = ? AND status = 'open' AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (entity_id, cutoff_str),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                """
+                SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                FROM events
+                WHERE entity_id = ? AND status = 'open'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (entity_id,),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return Event(
+            id=row[0],
+            entity_id=row[1],
+            event_type=row[2],
+            status=row[3],
+            importance=row[4],
+            created_at=_parse_iso_datetime(row[5]) or _fallback_datetime(),
+            updated_at=_parse_iso_datetime(row[6]) or _fallback_datetime(),
+        )
 
     # ------------------------------------------------------------------
     # Fetch state
