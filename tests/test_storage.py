@@ -9,4 +9,4 @@ def test_sqlite_foundation(tmp_path):
         connection.execute("INSERT INTO test DEFAULT VALUES")
         row = connection.execute("SELECT COUNT(*) FROM test").fetchone()
 
-    assert row == (1,)
+    assert row[0] == 1
