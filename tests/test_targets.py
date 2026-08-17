@@ -6,6 +6,7 @@ from web_watcher.targets import (
     SUPPORTED_TARGET_TYPES,
     WatchTarget,
     validate_watch_target,
+    validate_target_url_policy,
 )
 
 
@@ -112,3 +113,51 @@ class TestValidateWatchTarget:
 
     def test_one_second_poll_accepted(self):
         validate_watch_target(_mk_target(poll_interval_seconds=1))
+
+
+class TestValidateTargetUrlPolicy:
+
+    def test_github_locator_valid(self):
+        validate_target_url_policy(
+            _mk_target(locator="openai/gpt-4o")
+        )
+
+    def test_github_locator_missing_slash_rejected(self):
+        with pytest.raises(ValueError, match="owner/repository"):
+            validate_target_url_policy(
+                _mk_target(locator="openai")
+            )
+
+    def test_web_locator_http_accepted(self):
+        validate_target_url_policy(
+            _mk_target(
+                target_type="official_website",
+                locator="http://example.com",
+            )
+        )
+
+    def test_web_locator_https_accepted(self):
+        validate_target_url_policy(
+            _mk_target(
+                target_type="news_source",
+                locator="https://example.com/feed",
+            )
+        )
+
+    def test_web_locator_non_http_rejected(self):
+        with pytest.raises(ValueError, match="http:// or https://"):
+            validate_target_url_policy(
+                _mk_target(
+                    target_type="official_website",
+                    locator="ftp://example.com",
+                )
+            )
+
+    def test_web_locator_ftp_rejected(self):
+        with pytest.raises(ValueError, match="http:// or https://"):
+            validate_target_url_policy(
+                _mk_target(
+                    target_type="news_source",
+                    locator="ssh://git@example.com",
+                )
+            )

@@ -6,6 +6,7 @@ from pathlib import Path
 from .targets import (
     WatchTarget,
     validate_watch_target,
+    validate_target_url_policy,
 )
 
 
@@ -61,15 +62,16 @@ def load_config(path: str | Path) -> list[WatchTarget]:
                 poll_interval_seconds=item.get("poll_interval_seconds"),
             )
             validate_watch_target(target)
-        except KeyError as exc:
-            raise ConfigError(
-                f"watch_targets[{index}] missing required field: {exc}"
-            ) from exc
-        except ValueError as exc:
+            validate_target_url_policy(target)
+        except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(
                 f"watch_targets[{index}] invalid: {exc}"
             ) from exc
 
         result.append(target)
+
+    keys = [target.key for target in result]
+    if len(keys) != len(set(keys)):
+        raise ConfigError("watch target keys must be unique")
 
     return result

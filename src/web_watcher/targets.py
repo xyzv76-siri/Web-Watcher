@@ -45,3 +45,29 @@ def validate_watch_target(target: WatchTarget) -> None:
             raise ValueError(
                 "poll interval must be greater than zero"
             )
+
+
+def validate_target_url_policy(target: WatchTarget) -> None:
+    """
+    Validate locator policy without performing network access.
+
+    This phase only establishes the contract.
+    Actual network safety belongs to the future fetch layer.
+    """
+    if target.target_type == "github_repository":
+        if "/" not in target.locator:
+            raise ValueError(
+                "github repository locator must be owner/repository"
+            )
+
+    if target.target_type in {
+        "official_website",
+        "news_source",
+    }:
+        if not (
+            target.locator.startswith("https://")
+            or target.locator.startswith("http://")
+        ):
+            raise ValueError(
+                "web target locator must use http:// or https://"
+            )
