@@ -64,11 +64,17 @@ CREATE TABLE IF NOT EXISTS fetch_state (
 CREATE INDEX IF NOT EXISTS idx_signals_entity
     ON signals(entity_id);
 
+CREATE INDEX IF NOT EXISTS idx_signals_observed
+    ON signals(observed_at);
+
 CREATE INDEX IF NOT EXISTS idx_events_entity
     ON events(entity_id);
 
 CREATE INDEX IF NOT EXISTS idx_events_status
     ON events(status);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_event
+    ON notifications(event_id);
 
 CREATE INDEX IF NOT EXISTS idx_notifications_channel
     ON notifications(channel);

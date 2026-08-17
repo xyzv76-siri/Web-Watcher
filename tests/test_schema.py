@@ -1,13 +1,13 @@
 from datetime import datetime, timezone
 
-from web_watcher.storage import open_database, init_schema
+from web_watcher.storage import open_database, initialize_schema
 from web_watcher.models import Entity, Signal, Event, Notification, FetchState
 
 
 def test_schema_creates_all_tables(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
 
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -21,7 +21,7 @@ def test_schema_creates_all_tables(tmp_path):
 def test_schema_indexes_exist(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
 
         indexes = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name"
@@ -34,7 +34,7 @@ def test_schema_indexes_exist(tmp_path):
 def test_foreign_keys_enabled(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
         fk = conn.execute("PRAGMA foreign_keys").fetchone()
         assert fk[0] == 1
 
@@ -42,7 +42,7 @@ def test_foreign_keys_enabled(tmp_path):
 def test_entity_unique_constraint(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
 
         conn.execute("INSERT INTO entities (canonical_key, name, entity_type, created_at) VALUES (?, ?, ?, ?)",
                      ("repo:x/y", "Test", "github_repo", datetime.now(timezone.utc).isoformat()))
@@ -59,7 +59,7 @@ def test_entity_unique_constraint(tmp_path):
 def test_event_signal_junction(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
         dt = datetime.now(timezone.utc).isoformat()
 
         conn.execute("INSERT INTO entities (canonical_key, name, entity_type, created_at) VALUES (?,?,?,?)",
@@ -79,7 +79,7 @@ def test_event_signal_junction(tmp_path):
 def test_notification_unique_per_event_channel(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
         dt = datetime.now(timezone.utc).isoformat()
 
         conn.execute("INSERT INTO entities (canonical_key, name, entity_type, created_at) VALUES (?,?,?,?)",
@@ -102,7 +102,7 @@ def test_notification_unique_per_event_channel(tmp_path):
 def test_fetch_state_content_hash_index(tmp_path):
     db_path = tmp_path / "test.db"
     with open_database(db_path) as conn:
-        init_schema(conn)
+        initialize_schema(conn)
 
         conn.execute("INSERT INTO fetch_state (target_key, content_hash, fetched_at) VALUES (?,?,?)",
                      ("https://example.com", "sha256:abc", datetime.now(timezone.utc).isoformat()))

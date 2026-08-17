@@ -14,14 +14,12 @@ def open_database(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+def initialize_schema(connection: sqlite3.Connection) -> None:
+    """Apply the full schema to a connection using executescript."""
+    connection.executescript(SCHEMA)
+    connection.commit()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Apply the full schema to a connection."""
-    cur = conn.cursor()
-    for stmt in SCHEMA.strip().split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            cur.execute(stmt)
-            if stmt.upper().startswith("PRAGMA"):
-                continue
-            conn.commit()
-    conn.commit()
+    """Backwards-compatible alias for initialize_schema."""
+    initialize_schema(conn)
