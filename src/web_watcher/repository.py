@@ -3,12 +3,29 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from .models import Entity
+from .models import Entity, FetchState
 from .storage import open_database, initialize_schema
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _serialize_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
 
 
 class Repository:
@@ -67,3 +84,55 @@ class Repository:
             name=row[2],
             entity_type=row[3],
         )
+
+    # ------------------------------------------------------------------
+    # Fetch state
+    # ------------------------------------------------------------------
+
+    def get_fetch_state(
+        self,
+        target_key: str,
+    ) -> Optional[FetchState]:
+        """Return the FetchState for *target_key*, or None if absent."""
+        row = self.connection.execute(
+            """
+            SELECT target_key, etag, last_modified, content_hash, fetched_at
+            FROM fetch_state
+            WHERE target_key = ?
+            """,
+            (target_key,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return FetchState(
+            target_key=row["target_key"],
+            etag=row["etag"],
+            last_modified=row["last_modified"],
+            content_hash=row["content_hash"],
+            fetched_at=_parse_iso_datetime(row["fetched_at"]),
+        )
+
+    def upsert_fetch_state(self, state: FetchState) -> FetchState:
+        """Insert or replace the FetchState for a target key.
+
+        Uses a single REPLACE INTO (SQLite UPSERT) so repeated calls
+        are idempotent and never create duplicate rows.
+        """
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO fetch_state
+                (target_key, etag, last_modified, content_hash, fetched_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                state.target_key,
+                state.etag,
+                state.last_modified,
+                state.content_hash,
+                _serialize_datetime(state.fetched_at),
+            ),
+        )
+        self.connection.commit()
+        return state
