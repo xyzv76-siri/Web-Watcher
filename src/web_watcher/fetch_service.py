@@ -42,6 +42,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from .signal_types import SignalType
 from .adapters import AdapterRegistry
 from .content_hash import sha256_of
 from .fetch import FetchRequest, FetchResult
@@ -52,7 +53,7 @@ from .targets import WatchTarget
 
 
 # Canonical signal type used for "content changed" observations.
-_SIGNAL_TYPE_CONTENT_CHANGE = "content_change"
+_SIGNAL_TYPE_CONTENT_CHANGE = SignalType.CONTENT_CHANGE.value
 
 
 def _canonical_entity_key(target: WatchTarget) -> str:
