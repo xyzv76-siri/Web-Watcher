@@ -418,8 +418,8 @@ class TestEventTypeDerivation:
         assert _derive_event_type(sig) == "content_change"
 
     def test_derivation_is_identity_for_known_signal(self):
-        sig = Signal(id=1, entity_id=1, signal_type="star_velocity", observed_at=_ts())
-        assert _derive_event_type(sig) == "star_velocity"
+        sig = Signal(id=1, entity_id=1, signal_type="stars_changed", observed_at=_ts())
+        assert _derive_event_type(sig) == "stars_changed"
 
 
 # ===========================================================================

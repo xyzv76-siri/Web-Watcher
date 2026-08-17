@@ -18,6 +18,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from .event_types import EventType
+from .signal_types import SignalType
 from .models import Event, Signal
 from .repository import Repository
 
@@ -179,4 +181,13 @@ def _derive_event_type(signal: Signal) -> str:
     signal types (star_velocity, release, trending, commit_velocity)
     without rewriting this layer.
     """
-    return signal.signal_type
+    mapping = {
+        SignalType.CONTENT_CHANGE.value: EventType.CONTENT_CHANGE.value,
+        SignalType.STARS_CHANGED.value: EventType.STARS_CHANGED.value,
+        SignalType.RELEASE_PUBLISHED.value: EventType.RELEASE_PUBLISHED.value,
+    }
+
+    return mapping.get(
+        signal.signal_type,
+        EventType.CONTENT_CHANGE.value,
+    )

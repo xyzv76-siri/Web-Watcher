@@ -7,6 +7,7 @@ Telegram integration, scheduling, or external side effects.
 from dataclasses import dataclass
 from enum import Enum
 
+from .event_types import EventType
 from .models import Event
 
 
@@ -63,13 +64,13 @@ class PolicyEngine:
         metadata, so unknown events remain safely IGNORE by default.
         """
 
-        if event.event_type == "critical":
+        if event.event_type in ("critical", EventType.RELEASE_PUBLISHED.value):
             return Importance.CRITICAL
 
-        if event.event_type == "important":
+        if event.event_type in ("important", EventType.STARS_CHANGED.value):
             return Importance.IMPORTANT
 
-        if event.event_type == "interesting":
+        if event.event_type in ("interesting", EventType.CONTENT_CHANGE.value):
             return Importance.INTERESTING
 
         return Importance.IGNORE
