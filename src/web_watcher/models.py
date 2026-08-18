@@ -1,6 +1,6 @@
 """Core Web Watcher domain models."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -79,7 +79,10 @@ class Target:
     consecutive_failures: int = 0
     last_fetched_at: Optional[datetime] = None
     next_allowed_at: Optional[datetime] = None
-    metadata: Dict[str, Any] = None
+    lease_owner: Optional[str] = None
+    lease_until: Optional[datetime] = None
+    claim_token: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.metadata is None:

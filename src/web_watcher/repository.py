@@ -822,11 +822,23 @@ class Repository:
                 consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 last_fetched_at TEXT,
                 next_allowed_at TEXT,
+                lease_owner TEXT,
+                lease_until TEXT,
+                claim_token TEXT,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
+        # Incrementally add lease columns for existing databases
+        cols = [c[1] for c in self.connection.execute("PRAGMA table_info(targets)").fetchall()]
+        for col_name, col_type in [
+            ("lease_owner", "TEXT"),
+            ("lease_until", "TEXT"),
+            ("claim_token", "TEXT"),
+        ]:
+            if col_name not in cols:
+                self.connection.execute(f"ALTER TABLE targets ADD COLUMN {col_name} {col_type}")
         self.connection.commit()
 
     def save_target(self, target: Any) -> None:
@@ -835,13 +847,18 @@ class Repository:
         status_val = target.status.value if hasattr(target.status, "value") else str(target.status)
         last_fetched_iso = _serialize_datetime(target.last_fetched_at)
         next_allowed_iso = _serialize_datetime(target.next_allowed_at)
+        lease_owner = getattr(target, "lease_owner", None)
+        lease_until_iso = _serialize_datetime(getattr(target, "lease_until", None))
+        claim_token = getattr(target, "claim_token", None)
         meta_json = json.dumps(target.metadata or {})
 
         self.connection.execute("""
             INSERT INTO targets (
                 id, url, interval, status, etag, last_modified, content_hash,
-                consecutive_failures, last_fetched_at, next_allowed_at, metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                consecutive_failures, last_fetched_at, next_allowed_at,
+                lease_owner, lease_until, claim_token,
+                metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 interval = excluded.interval,
@@ -852,12 +869,17 @@ class Repository:
                 consecutive_failures = excluded.consecutive_failures,
                 last_fetched_at = excluded.last_fetched_at,
                 next_allowed_at = excluded.next_allowed_at,
+                lease_owner = excluded.lease_owner,
+                lease_until = excluded.lease_until,
+                claim_token = excluded.claim_token,
                 metadata_json = excluded.metadata_json,
                 updated_at = excluded.updated_at
         """, (
             target.id, target.url, target.interval, status_val, target.etag,
             target.last_modified, target.content_hash, target.consecutive_failures,
-            last_fetched_iso, next_allowed_iso, meta_json, now_iso, now_iso
+            last_fetched_iso, next_allowed_iso,
+            lease_owner, lease_until_iso, claim_token,
+            meta_json, now_iso, now_iso
         ))
         self.connection.commit()
 
@@ -878,6 +900,9 @@ class Repository:
             consecutive_failures=row["consecutive_failures"],
             last_fetched_at=_parse_iso_datetime(row["last_fetched_at"]),
             next_allowed_at=_parse_iso_datetime(row["next_allowed_at"]),
+            lease_owner=row["lease_owner"],
+            lease_until=_parse_iso_datetime(row["lease_until"]),
+            claim_token=row["claim_token"],
             metadata=json.loads(row["metadata_json"] or "{}"),
         )
 
@@ -897,6 +922,9 @@ class Repository:
                 consecutive_failures=r["consecutive_failures"],
                 last_fetched_at=_parse_iso_datetime(r["last_fetched_at"]),
                 next_allowed_at=_parse_iso_datetime(r["next_allowed_at"]),
+                lease_owner=r["lease_owner"],
+                lease_until=_parse_iso_datetime(r["lease_until"]),
+                claim_token=r["claim_token"],
                 metadata=json.loads(r["metadata_json"] or "{}"),
             )
             for r in rows
@@ -952,3 +980,174 @@ class Repository:
             schedulable.append(t)
         return schedulable
 
+    def claim_targets(
+        self,
+        worker_id: str,
+        limit: int = 10,
+        lease_duration_sec: float = 300.0,
+        now: Optional[datetime] = None,
+    ) -> List[Any]:
+        """
+        Atomic claim for distributed workers.
+        Selects schedulable targets and assigns a short-lived lease with a unique claim token.
+        """
+        import uuid
+        from datetime import timedelta, timezone
+
+        self._init_target_table()
+        from web_watcher.models import Target, TargetStatus
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        lease_until_dt = now_dt + timedelta(seconds=lease_duration_sec)
+        now_iso = now_dt.isoformat()
+        lease_until_iso = lease_until_dt.isoformat()
+
+        claimed: List[Target] = []
+
+        with self.connection:
+            cursor = self.connection.cursor()
+            rows = cursor.execute("""
+                SELECT id, url, interval, status, etag, last_modified, content_hash,
+                       consecutive_failures, last_fetched_at, next_allowed_at, metadata_json
+                FROM targets
+                WHERE (status IN ('normal', 'recovering', 'cooldown'))
+                  AND (next_allowed_at IS NULL OR next_allowed_at <= ?)
+                  AND (lease_until IS NULL OR lease_until < ?)
+                ORDER BY next_allowed_at ASC NULLS FIRST
+                LIMIT ?
+            """, (now_iso, now_iso, limit)).fetchall()
+
+            for r in rows:
+                target_id = r["id"]
+                new_status = (
+                    TargetStatus.RECOVERING.value
+                    if r["status"] == TargetStatus.COOLDOWN.value
+                    else r["status"]
+                )
+                claim_token = str(uuid.uuid4())
+                cursor.execute("""
+                    UPDATE targets
+                    SET status = ?, lease_owner = ?, lease_until = ?, claim_token = ?, updated_at = ?
+                    WHERE id = ?
+                """, (new_status, worker_id, lease_until_iso, claim_token, now_iso, target_id))
+
+                claimed.append(Target(
+                    id=target_id,
+                    url=r["url"],
+                    interval=r["interval"],
+                    status=TargetStatus(new_status),
+                    etag=r["etag"],
+                    last_modified=r["last_modified"],
+                    content_hash=r["content_hash"],
+                    consecutive_failures=r["consecutive_failures"],
+                    last_fetched_at=_parse_iso_datetime(r["last_fetched_at"]),
+                    next_allowed_at=_parse_iso_datetime(r["next_allowed_at"]),
+                    lease_owner=worker_id,
+                    lease_until=lease_until_dt,
+                    claim_token=claim_token,
+                    metadata=json.loads(r["metadata_json"] or "{}"),
+                ))
+
+        return claimed
+
+    def commit_target_execution(
+        self,
+        target_id: str,
+        claim_token: str,
+        new_status: Any,
+        etag: Optional[str] = None,
+        last_modified: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        consecutive_failures: int = 0,
+        next_allowed_at: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Fenced commit: only succeeds if the claim_token matches.
+        Clears lease fields on successful commit.
+        Returns True if the row was updated, False if the lease was lost.
+        """
+        from datetime import timezone
+
+        self._init_target_table()
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        next_iso = _serialize_datetime(next_allowed_at)
+        now_iso = now_dt.isoformat()
+        status_val = new_status.value if hasattr(new_status, "value") else str(new_status)
+        meta_json = json.dumps(metadata) if metadata is not None else None
+
+        with self.connection:
+            cursor = self.connection.cursor()
+            if meta_json is not None:
+                cursor.execute("""
+                    UPDATE targets SET
+                        status = ?, etag = ?, last_modified = ?, content_hash = ?,
+                        consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
+                        lease_owner = NULL, lease_until = NULL, claim_token = NULL,
+                        metadata_json = ?, updated_at = ?
+                    WHERE id = ? AND claim_token = ?
+                """, (
+                    status_val, etag, last_modified, content_hash,
+                    consecutive_failures, now_iso, next_iso,
+                    meta_json, now_iso, target_id, claim_token
+                ))
+            else:
+                cursor.execute("""
+                    UPDATE targets SET
+                        status = ?, etag = ?, last_modified = ?, content_hash = ?,
+                        consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
+                        lease_owner = NULL, lease_until = NULL, claim_token = NULL,
+                        updated_at = ?
+                    WHERE id = ? AND claim_token = ?
+                """, (
+                    status_val, etag, last_modified, content_hash,
+                    consecutive_failures, now_iso, next_iso,
+                    now_iso, target_id, claim_token
+                ))
+            return cursor.rowcount > 0
+
+    def release_target_lease(
+        self,
+        target_id: str,
+        claim_token: str,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Release a lease without persisting execution results.
+        Returns True if the lease was released, False if it was already taken.
+        """
+        from datetime import timezone
+
+        self._init_target_table()
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        now_iso = now_dt.isoformat()
+
+        with self.connection:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE targets
+                SET lease_owner = NULL, lease_until = NULL, claim_token = NULL, updated_at = ?
+                WHERE id = ? AND claim_token = ?
+            """, (now_iso, target_id, claim_token))
+            return cursor.rowcount > 0
