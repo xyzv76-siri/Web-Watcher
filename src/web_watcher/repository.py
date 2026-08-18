@@ -1,9 +1,10 @@
 """Persistence operations for Web Watcher core state."""
 
+import json
 import sqlite3
 
 from datetime import datetime, timezone
-from typing import Optional, Union
+from typing import Optional, Union, Dict, List, Any
 
 from .models import Entity, Event, FetchState, Signal
 from .storage import initialize_schema, open_database
@@ -564,3 +565,72 @@ class Repository:
         )
         self.connection.commit()
         return state
+
+    def save_investigation_result(
+        self,
+        investigation_id: str,
+        event_id: str,
+        task_type: str,
+        status: str,
+        summary: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        evidence_items: Optional[List[Dict[str, Any]]] = None,
+        created_at: Optional[str] = None,
+    ) -> None:
+        ts = created_at or datetime.now(timezone.utc).isoformat()
+        meta_json = json.dumps(metadata or {})
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO investigation_results (id, event_id, task_type, status, summary, metadata, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (investigation_id, event_id, str(task_type), str(status), summary, meta_json, ts),
+            )
+            if evidence_items:
+                for idx, item in enumerate(evidence_items):
+                    ev_id = f"{investigation_id}_ev_{idx}"
+                    ev_type = str(item.get("evidence_type", "generic"))
+                    ev_payload = json.dumps(item.get("payload", {}))
+                    self.connection.execute(
+                        "INSERT INTO investigation_evidence (id, investigation_id, evidence_type, payload, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (ev_id, investigation_id, ev_type, ev_payload, ts),
+                    )
+
+    def get_investigation_result(self, investigation_id: str) -> Optional[Dict[str, Any]]:
+        cursor = self.connection.execute("SELECT * FROM investigation_results WHERE id = ?", (investigation_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        ev_cursor = self.connection.execute(
+            "SELECT * FROM investigation_evidence WHERE investigation_id = ? ORDER BY id ASC",
+            (investigation_id,),
+        )
+        evidence = [
+            {
+                "id": ev["id"],
+                "evidence_type": ev["evidence_type"],
+                "payload": json.loads(ev["payload"]),
+                "created_at": ev["created_at"],
+            }
+            for ev in ev_cursor.fetchall()
+        ]
+        return {
+            "id": row["id"],
+            "event_id": row["event_id"],
+            "task_type": row["task_type"],
+            "status": row["status"],
+            "summary": row["summary"],
+            "metadata": json.loads(row["metadata"]),
+            "created_at": row["created_at"],
+            "evidence": evidence,
+        }
+
+    def get_investigation_result_by_event(self, event_id: str) -> Optional[Dict[str, Any]]:
+        cursor = self.connection.execute(
+            "SELECT id FROM investigation_results WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
+            (event_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return self.get_investigation_result(row["id"])

@@ -53,6 +53,26 @@ CREATE TABLE IF NOT EXISTS notifications (
     UNIQUE(event_id, channel)
 );
 
+CREATE TABLE IF NOT EXISTS investigation_results (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    metadata TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (event_id) REFERENCES events (id)
+);
+
+CREATE TABLE IF NOT EXISTS investigation_evidence (
+    id TEXT PRIMARY KEY,
+    investigation_id TEXT NOT NULL,
+    evidence_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (investigation_id) REFERENCES investigation_results (id)
+);
+
 CREATE TABLE IF NOT EXISTS fetch_state (
     target_key TEXT PRIMARY KEY,
     etag TEXT,

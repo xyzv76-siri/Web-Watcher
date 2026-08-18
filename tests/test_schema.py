@@ -14,7 +14,7 @@ def test_schema_creates_all_tables(tmp_path):
         ).fetchall()
         table_names = sorted(row["name"] for row in tables if row["name"] != "sqlite_sequence")
 
-        expected = sorted(["entities", "signals", "events", "event_signals", "notifications", "fetch_state"])
+        expected = sorted(["entities", "signals", "events", "event_signals", "notifications", "fetch_state", "investigation_results", "investigation_evidence"])
         assert table_names == expected
 
 
