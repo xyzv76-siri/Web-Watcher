@@ -4,6 +4,8 @@ import argparse
 import logging
 import sys
 import time
+import urllib.request
+from pathlib import Path
 from typing import List, Optional
 
 from .channel_senders import WebhookSender
@@ -16,6 +18,8 @@ from .repository import Repository
 from .doctor import SystemDoctor
 from .retention import RetentionManager, RetentionPolicy
 from .config import get_config, AppConfig
+from .rule_parser import RuleParser
+from .rule_evaluator import RuleEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +277,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 8. test-rule subcommand (Phase 17-C)
+    test_rule_parser = subparsers.add_parser(
+        "test-rule",
+        help="Test and debug a YAML rule file",
+    )
+    test_rule_parser.add_argument("rule_file", help="Path to YAML rule file")
+    test_rule_parser.add_argument("--html-file", default=None, help="Local HTML file to evaluate against")
+    test_rule_parser.add_argument("--url", default=None, help="Remote URL to fetch and evaluate")
+
     return parser
 
 
@@ -479,6 +492,35 @@ def handle_retention(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
+def handle_test_rule(args: argparse.Namespace) -> int:
+    try:
+        ruleset = RuleParser.parse_file(args.rule_file)
+    except Exception as e:
+        print(f"[ERROR] Failed to parse rule file: {e}")
+        return 1
+
+    print(f"Loaded {len(ruleset.rules)} rule(s) from {args.rule_file}:\n")
+    for rule in ruleset.rules:
+        print(f"=== Rule [{rule.id}]: {rule.name} ===")
+        html_content = ""
+        if args.html_file:
+            html_content = Path(args.html_file).read_text(encoding="utf-8")
+        elif args.url:
+            req = urllib.request.Request(args.url, headers=rule.target.headers or {"User-Agent": "WebWatcher/1.0"})
+            with urllib.request.urlopen(req, timeout=rule.target.timeout) as resp:
+                html_content = resp.read().decode("utf-8", errors="ignore")
+        else:
+            print(f"  Target URL: {rule.target.url} (no HTML sample provided, skipping live extraction)")
+            continue
+
+        result = RuleEvaluator.evaluate(rule, html_content)
+        print("  Extracted Values:")
+        for k, v in result.extracted_values.items():
+            print(f"    - {k}: {v} ({type(v).__name__})")
+        print()
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -498,6 +540,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_doctor(args, config)
     if args.command == "retention":
         return handle_retention(args, config)
+    if args.command == "test-rule":
+        return handle_test_rule(args)
 
     parser.print_help()
     return 0
