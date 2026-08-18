@@ -1,208 +1,203 @@
-"""Deterministic event correlation — Phase 8.
+"""Event Correlator: aggregates signals into domain events and manages auto-investigation dispatch (Phase 11-B)."""
 
-Converts Signals into coherent Events.
-
-Correlation Rule V1:
-    Signals may belong to the same Event when:
-      1. They belong to the same Entity.
-      2. The Event is still open.
-      3. The Signal's observed_at is within the correlation window
-         of the Event's created_at.
-
-Default correlation window: 24 hours.
-No AI, LLM, embeddings, semantic similarity, network calls, or scheduling.
-"""
-
-from __future__ import annotations
-
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+import logging
+from typing import Any, Dict, List, Optional
 
-from .event_types import EventType
 from .event_status import EventStatus
+from .event_types import EventType
 from .importance import Importance
-from .signal_types import SignalType
-from .models import Event, Signal
+from .investigation_adapter import EventInvestigationAdapter
+from .models import Entity, Event, Signal
 from .repository import Repository
+from .signal_types import SignalType
+
+logger = logging.getLogger(__name__)
 
 
+@dataclass
 class CorrelationConfig:
-    """Configurable, deterministic correlation parameters."""
+    """Correlation tuning knobs for the correlator."""
 
-    def __init__(
-        self,
-        correlation_window_seconds: int = 24 * 3600,
-        default_importance: Union[Importance, str] = Importance.INTERESTING,
-    ):
-        if correlation_window_seconds <= 0:
-            raise ValueError("correlation_window_seconds must be positive")
-        self.correlation_window_seconds = correlation_window_seconds
-        if isinstance(default_importance, Importance):
-            self.default_importance = default_importance
-        else:
-            normalized = str(default_importance).strip().lower()
-            legacy_map = {
-                "low": Importance.IGNORE,
-                "medium": Importance.INTERESTING,
-                "high": Importance.IMPORTANT,
-                "critical": Importance.CRITICAL,
-            }
-            if normalized in legacy_map:
-                self.default_importance = legacy_map[normalized]
-            else:
-                self.default_importance = Importance.from_value(normalized)
+    correlation_window_seconds: int = 24 * 3600
+    default_importance: str = "medium"
+
+    def __post_init__(self):
+        if self.correlation_window_seconds <= 0:
+            raise ValueError("correlation_window_seconds must be > 0")
 
     @property
     def window(self) -> timedelta:
         return timedelta(seconds=self.correlation_window_seconds)
 
 
-class EventCorrelator:
-    """Correlates Signals into Events deterministically.
+def _derive_event_type(signal: Signal) -> str:
+    """Backward-compatible helper that returns the event type string."""
+    correlator = EventCorrelator(repository=None)
+    resolved = correlator._resolve_event_type(signal)
+    return resolved.value if hasattr(resolved, "value") else str(resolved)
 
-    Does NOT:
-        - call AI / LLM
-        - send Telegram messages
-        - access the network
-        - schedule jobs
-        - use wall-clock time (test injection supported)
-    """
+
+class EventCorrelator:
+    """Correlates incoming signals into domain events and optionally triggers investigations."""
 
     def __init__(
         self,
         repository: Repository,
+        auto_investigate: bool = False,
+        investigation_adapter: Optional[EventInvestigationAdapter] = None,
+        planner: Optional[Any] = None,
+        engine: Optional[Any] = None,
         config: Optional[CorrelationConfig] = None,
-        now_factory: Optional[callable] = None,
+        now_factory: Optional[Any] = None,
     ):
-        self._repo = repository
-        self._config = config or CorrelationConfig()
-        # Injectable clock for deterministic tests
-        self._now_factory = now_factory or _utcnow
+        self.repository = repository
+        self.auto_investigate = auto_investigate
+        self.config = config or CorrelationConfig()
+        self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+        self.investigation_adapter = investigation_adapter or (
+            EventInvestigationAdapter() if auto_investigate else None
+        )
+        self.planner = planner
+        self.engine = engine
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _resolve_event_type(self, signal: Signal) -> EventType:
+        sig_type = signal.signal_type
+        if sig_type == SignalType.STARS_CHANGED:
+            return EventType.STARS_CHANGED
+        if sig_type == SignalType.RELEASE_PUBLISHED:
+            return EventType.RELEASE_PUBLISHED
+        return EventType.CONTENT_CHANGE
 
-    def correlate(self, signal: Signal) -> Event:
-        """Correlate *signal* into an existing open Event, or create a new one.
+    def _evaluate_importance(self, signal: Signal, existing_event: Optional[Event] = None) -> Importance:
+        sig_type = signal.signal_type
+        if sig_type == SignalType.RELEASE_PUBLISHED:
+            return Importance.CRITICAL
+        if sig_type == SignalType.CONTENT_CHANGE:
+            return Importance.IMPORTANT
+        return Importance.INTERESTING
 
-        The Signal is first persisted to the repository (create_signal).
-        If it is a duplicate fingerprint for the same entity+signal_type,
-        create_signal returns None and correlate() re-persists it with a
-        derived unique fingerprint before proceeding.
-
-        Steps:
-            1. Persist the Signal into the repository
-            2. Determine the time window: [now - window, now]
-            3. Look for an open Event for the same entity within the window
-            4. If found → attach signal to that Event
-            5. Otherwise → create a new Event and attach signal
-
-        Returns the Event the signal belongs to.
-        """
-        now = self._now_factory()
-
-        # Ensure the signal exists in the database before correlating.
-        signal = self._persist_signal(signal)
-
-        window_start = now - self._config.window
-
-        open_event = self._repo.find_open_event_for_entity(
-            entity_id=signal.entity_id,
-            cutoff=window_start,
+    def process_signal(self, signal: Signal) -> Event:
+        """Processes an incoming signal, correlates it into an event, and triggers auto-investigation if enabled."""
+        entity_id = signal.entity_id
+        resolved_type = self._resolve_event_type(signal)
+        now = self.now_factory()
+        cutoff = now - self.config.window
+        open_event = self.repository.find_open_event_for_entity(
+            entity_id,
+            event_type=resolved_type,
+            cutoff=cutoff,
         )
 
-        if open_event is not None:
-            self._repo.attach_signal_to_event(open_event.id, signal.id)
-            self._repo.update_event(
-                event_id=open_event.id,
-                updated_at=now,
+        importance = self._evaluate_importance(signal, open_event)
+
+        if open_event is None:
+            event = self.repository.create_event(
+                entity_id=entity_id,
+                event_type=resolved_type,
+                status=EventStatus.OPEN,
+                importance=importance,
+                created_at=signal.observed_at,
             )
-            return open_event
+        else:
+            event = open_event
+            if (
+                importance == Importance.CRITICAL
+                or (importance == Importance.IMPORTANT and event.importance == Importance.INTERESTING)
+            ):
+                self.repository.update_event(event.id, importance=importance)
+                refreshed = self.repository.get_event(event.id)
+                if refreshed:
+                    event = refreshed
 
-        event_type = _derive_event_type(signal)
-        event = self._repo.create_event(
-            entity_id=signal.entity_id,
-            event_type=event_type,
-            status=EventStatus.OPEN,
-            importance=self._config.default_importance,
-            created_at=signal.observed_at,
-        )
-        self._repo.attach_signal_to_event(event.id, signal.id)
+        persisted_signal = self._persist_signal_if_needed(signal)
+        if persisted_signal is not None:
+            signal = persisted_signal
+
+        if signal.id is not None:
+            self.repository.link_signal_to_event(event.id, signal.id)
+
+        if self.auto_investigate:
+            self.dispatch_investigation(event)
+
         return event
 
-    def close_event(self, event_id: int) -> Optional[Event]:
-        """Close an open Event. A closed Event will not accept new Signals.
-
-        Returns the closed Event or None if not found.
-        """
-        return self._repo.update_event(event_id=event_id, status=EventStatus.CLOSED)
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _persist_signal(self, signal: Signal) -> Signal:
-        """Persist a Signal into the repository, returning the stored object.
-
-        If the fingerprint is already taken (duplicate observation),
-        a new unique fingerprint is derived and used.
-        """
-        stored = self._repo.create_signal(
+    def _persist_signal_if_needed(self, signal: Signal) -> Optional[Signal]:
+        if signal.id is None:
+            return None
+        existing = self.repository.connection.execute(
+            "SELECT id FROM signals WHERE id = ?", (signal.id,)
+        ).fetchone()
+        if existing:
+            return signal
+        return self.repository.create_signal(
             entity_id=signal.entity_id,
             signal_type=signal.signal_type,
             observed_at=signal.observed_at,
             value=signal.value,
             fingerprint=signal.fingerprint,
         )
-        if stored is not None:
-            return stored
 
-        # Duplicate fingerprint — create a new unique one
-        unique_fp = (
-            signal.fingerprint
-            if signal.fingerprint
-            else "auto-fp"
-        ) + "-dup-" + str(abs(hash(signal.value or "")))
-        stored = self._repo.create_signal(
-            entity_id=signal.entity_id,
-            signal_type=signal.signal_type,
-            observed_at=signal.observed_at,
-            value=signal.value,
-            fingerprint=unique_fp,
-        )
-        if stored is None:
-            raise RuntimeError(
-                f"unable to persist signal for entity={signal.entity_id} "
-                f"type={signal.signal_type}"
+    def correlate(self, signal: Signal) -> Event:
+        """Alias for process_signal to maintain backward compatibility."""
+        return self.process_signal(signal)
+
+    def close_event(self, event_id: int) -> None:
+        """Close an existing event so it no longer accepts new signals."""
+        self.repository.update_event(event_id=event_id, status=EventStatus.CLOSED)
+
+    def dispatch_investigation(self, event: Event) -> bool:
+        """Dispatches automatic investigation for an event if eligible and not previously investigated."""
+        adapter = self.investigation_adapter or EventInvestigationAdapter()
+        if not adapter.is_eligible(event):
+            return False
+
+        existing = self.repository.get_investigation_result_by_event(event.id)
+        if existing is not None:
+            return False
+
+        try:
+            task_type = adapter.resolve_task_type(event)
+            task_type_str = task_type.value if hasattr(task_type, "value") else str(task_type)
+
+            result = adapter.run_for_event(
+                event,
+                planner=self.planner,
+                engine=self.engine,
             )
-        return stored
+            if result is None:
+                return False
 
-    def _count_signals_for_event(self, event_id: int) -> int:
-        return len(self._repo.get_event_signals(event_id))
+            summary = getattr(result, "summary", None) or f"Auto-investigation completed for event {event.id}"
+            metadata = getattr(result, "metadata", {}) or {}
+            raw_evidence = getattr(result, "evidence", []) or []
 
+            evidence_items = []
+            for item in raw_evidence:
+                if isinstance(item, dict):
+                    evidence_items.append(item)
+                else:
+                    evidence_items.append({
+                        "evidence_type": getattr(item, "evidence_type", "generic"),
+                        "payload": getattr(item, "payload", {}),
+                    })
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+            inv_id = f"inv_auto_{event.id}"
+            status_val = "completed"
+            if hasattr(result, "status"):
+                status_val = result.status.value if hasattr(result.status, "value") else str(result.status)
 
-
-def _derive_event_type(signal: Signal) -> EventType:
-    """Derive a canonical event_type from a Signal's type.
-
-    Phase 8 V1 mapping — deterministic, one-to-one:
-        content_change  →  content_change
-
-    No suffix, no transformation. Keep it extensible for future
-    signal types (star_velocity, release, trending, commit_velocity)
-    without rewriting this layer.
-    """
-    mapping = {
-        SignalType.CONTENT_CHANGE: EventType.CONTENT_CHANGE,
-        SignalType.STARS_CHANGED: EventType.STARS_CHANGED,
-        SignalType.RELEASE_PUBLISHED: EventType.RELEASE_PUBLISHED,
-    }
-
-    return mapping.get(
-        signal.signal_type,
-        EventType.CONTENT_CHANGE,
-    )
+            self.repository.save_investigation_result(
+                investigation_id=inv_id,
+                event_id=event.id,
+                task_type=task_type_str,
+                status=status_val,
+                summary=summary,
+                metadata=metadata,
+                evidence_items=evidence_items,
+            )
+            return True
+        except Exception as exc:
+            logger.error(f"Auto investigation dispatch failed for event {event.id}: {exc}", exc_info=True)
+            return False

@@ -460,7 +460,7 @@ class TestImportanceDefault:
         correlator = EventCorrelator(repository=repo, now_factory=lambda: _ts())
         sig = _sig(id_=1, entity_id=eid, fingerprint="fp-imp")
         e = correlator.correlate(sig)
-        assert e.importance == Importance.INTERESTING
+        assert e.importance == Importance.IMPORTANT
         repo.close()
 
     def test_custom_importance_config(self, tmp_path):

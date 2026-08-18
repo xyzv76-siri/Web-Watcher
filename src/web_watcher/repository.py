@@ -441,6 +441,9 @@ class Repository:
             self.connection.rollback()
             return False
 
+    # Backward-compatible alias used by legacy tests/callers
+    link_signal_to_event = attach_signal_to_event
+
     def get_event_signals(self, event_id: int) -> list[Signal]:
         """Return all Signals attached to *event_id*."""
         rows = self.connection.execute(
@@ -470,35 +473,62 @@ class Repository:
         self,
         entity_id: int,
         cutoff: Optional[datetime] = None,
+        event_type: Optional[Union[EventType, str]] = None,
     ) -> Optional[Event]:
         """Find the most recent *open* Event for *entity_id* created on or after *cutoff*.
 
         If *cutoff* is None, no time filter is applied.
+        If *event_type* is provided, only events of that type are returned.
         Returns the Event with the latest created_at among matches, or None.
         """
+        db_event_type = _normalize_event_type(event_type) if event_type is not None else None
         if cutoff is not None:
             cutoff_str = cutoff.isoformat()
-            row = self.connection.execute(
-                """
-                SELECT id, entity_id, event_type, status, importance, created_at, updated_at
-                FROM events
-                WHERE entity_id = ? AND status = ? AND created_at >= ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (entity_id, EventStatus.OPEN.value, cutoff_str),
-            ).fetchone()
+            if db_event_type is not None:
+                row = self.connection.execute(
+                    """
+                    SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                    FROM events
+                    WHERE entity_id = ? AND status = ? AND created_at >= ? AND event_type = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (entity_id, EventStatus.OPEN.value, cutoff_str, db_event_type),
+                ).fetchone()
+            else:
+                row = self.connection.execute(
+                    """
+                    SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                    FROM events
+                    WHERE entity_id = ? AND status = ? AND created_at >= ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (entity_id, EventStatus.OPEN.value, cutoff_str),
+                ).fetchone()
         else:
-            row = self.connection.execute(
-                """
-                SELECT id, entity_id, event_type, status, importance, created_at, updated_at
-                FROM events
-                WHERE entity_id = ? AND status = ?
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (entity_id, EventStatus.OPEN.value),
-            ).fetchone()
+            if db_event_type is not None:
+                row = self.connection.execute(
+                    """
+                    SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                    FROM events
+                    WHERE entity_id = ? AND status = ? AND event_type = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (entity_id, EventStatus.OPEN.value, db_event_type),
+                ).fetchone()
+            else:
+                row = self.connection.execute(
+                    """
+                    SELECT id, entity_id, event_type, status, importance, created_at, updated_at
+                    FROM events
+                    WHERE entity_id = ? AND status = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (entity_id, EventStatus.OPEN.value),
+                ).fetchone()
 
         if row is None:
             return None
