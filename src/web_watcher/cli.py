@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from .channel_senders import WebhookSender
 from .event_correlator import EventCorrelator
+from .exporter import AuditExporter
 from .investigation_worker import InvestigationWorker
 from .notification_dispatcher import NotificationDispatcher
 from .pipeline_runner import PipelineRunner
@@ -188,6 +189,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 5. export subcommand (Phase 13-C)
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Export offline audit report (Markdown/HTML)",
+    )
+    export_parser.add_argument(
+        "--format",
+        "-f",
+        choices=["markdown", "html", "md"],
+        default="markdown",
+        help="Export format (default: markdown)",
+    )
+    export_parser.add_argument(
+        "--since",
+        "-s",
+        default="24h",
+        help="Time filter (e.g. 24h, 7d, 30m)",
+    )
+    export_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Output file path (default: print to stdout)",
+    )
+    export_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     return parser
 
 
@@ -322,6 +356,29 @@ def handle_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_export(args: argparse.Namespace) -> int:
+    db_path = getattr(args, "db_path", "web_watcher.db")
+    fmt = getattr(args, "format", "markdown")
+    since = getattr(args, "since", "24h")
+    output = getattr(args, "output", None)
+
+    repo = Repository(db_path)
+    exporter = AuditExporter(repo)
+
+    if fmt == "html":
+        content = exporter.export_html(since)
+    else:
+        content = exporter.export_markdown(since)
+
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[OK] Audit report exported to {output}")
+    else:
+        print(content)
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -334,6 +391,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_run(args)
     if args.command == "daemon":
         return handle_daemon(args)
+    if args.command == "export":
+        return handle_export(args)
 
     parser.print_help()
     return 0
