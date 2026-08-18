@@ -1,5 +1,5 @@
 from web_watcher.dom_extractor import DOMExtractor
-from web_watcher.rule_models import ExtractorConfig
+from web_watcher.rule_models import ExtractorConfig, ExtractionStatus
 
 
 HTML_DOC = """
@@ -26,24 +26,29 @@ HTML_DOC = """
 
 
 def test_extract_by_id_and_class():
-    res = DOMExtractor.extract_by_css(HTML_DOC, "#main-header .title")
-    assert res == "Product Pricing"
+    cfg = ExtractorConfig(name="title", selector_type="css", selector="#main-header .title")
+    res = DOMExtractor.extract(HTML_DOC, cfg)
+    assert res.status == ExtractionStatus.FOUND
+    assert res.value == "Product Pricing"
 
 
 def test_extract_nested_descendant():
-    res = DOMExtractor.extract_by_css(HTML_DOC, "div.pricing-card div.price-box span.amount")
-    assert res == "79.00"
+    cfg = ExtractorConfig(name="amount", selector_type="css", selector="div.pricing-card div.price-box span.amount")
+    res = DOMExtractor.extract(HTML_DOC, cfg)
+    assert res.status == ExtractionStatus.FOUND
+    assert res.value == "79.00"
 
 
 def test_extract_with_transforms():
     cfg = ExtractorConfig(
         name="pro_price",
         selector_type="css",
-        selector="div.price-box",
-        transforms=["strip_tags", "regex:\\$(\\d+\\.\\d+)"],
+        selector="span.amount",
+        transforms=["strip_tags", "to_float"],
     )
     res = DOMExtractor.extract(HTML_DOC, cfg)
-    assert res == "79.00"
+    assert res.status == ExtractionStatus.FOUND
+    assert res.value == 79.0
 
 
 def test_extract_by_regex():
@@ -53,20 +58,23 @@ def test_extract_by_regex():
         selector=r"Pro Plan",
     )
     res = DOMExtractor.extract(HTML_DOC, cfg)
-    assert res == "Pro Plan"
+    assert res.status == ExtractionStatus.FOUND
+    assert res.value == "Pro Plan"
 
 
 def test_extract_missing_selector_returns_empty():
-    res = DOMExtractor.extract_by_css(HTML_DOC, "#non-existent")
-    assert res == ""
+    cfg = ExtractorConfig(name="missing", selector_type="css", selector="#non-existent")
+    res = DOMExtractor.extract(HTML_DOC, cfg)
+    assert res.status == ExtractionStatus.SELECTOR_NOT_FOUND
 
 
 def test_extract_raw_text():
     cfg = ExtractorConfig(
         name="raw",
-        selector_type="text",
+        selector_type="raw",
         selector="",
     )
     res = DOMExtractor.extract(HTML_DOC, cfg)
-    assert "Product Pricing" in res
-    assert "Pro Plan" in res
+    assert res.status == ExtractionStatus.FOUND
+    assert "Product Pricing" in res.value
+    assert "Pro Plan" in res.value

@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional
 from web_watcher.rule_models import WatcherRule, TriggerConfig
 from web_watcher.dom_extractor import DOMExtractor
+from web_watcher.rule_models import ExtractionStatus
 
 
 @dataclass
@@ -74,7 +75,11 @@ class RuleEvaluator:
 
         # 1. 执行字段提取
         for ext in rule.extractors:
-            extracted[ext.name] = DOMExtractor.extract(new_html, ext)
+            result = DOMExtractor.extract(new_html, ext)
+            if result.status == ExtractionStatus.FOUND:
+                extracted[ext.name] = result.value
+            else:
+                extracted[ext.name] = None
 
         triggered_events: List[TriggeredEvent] = []
 

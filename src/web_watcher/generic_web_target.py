@@ -2,12 +2,12 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Union
+from typing import Any, Dict, List, Optional
 from web_watcher.models import Target, TargetStatus
-from web_watcher.fetch_policy import FetchPolicy, FetchDecision, FetchEvaluation
+from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.dom_extractor import DOMExtractor
-from web_watcher.rule_models import ExtractorConfig
+from web_watcher.rule_models import ExtractorConfig, ExtractionResult
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -21,13 +21,15 @@ class TargetExecutionResult:
     status_code: Optional[int]
     new_status: TargetStatus
     signals_emitted: List[Any]
+    extracted_results: Dict[str, ExtractionResult]
     extracted_values: Dict[str, Any]
     is_304: bool = False
+    has_extraction_failures: bool = False
     reason: str = ""
 
 
 class GenericWebTarget:
-    """通用 Web 页面监控目标适配器：执行礼貌抓取、协商缓存判定、DOM/正则字段提取与 Signal 生产"""
+    """General-purpose web target adapter with polite fetch, cache handling, extraction, and false-positive guards."""
 
     def __init__(
         self,
@@ -52,7 +54,7 @@ class GenericWebTarget:
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
 
-        # 1. 策略前置判定（退避/冷却/ETag 装配）
+        # 1. Policy pre-check
         decision = policy.prepare_request(self.target, now=now)
         if not decision.allowed:
             return TargetExecutionResult(
@@ -61,11 +63,12 @@ class GenericWebTarget:
                 status_code=None,
                 new_status=self.target.status,
                 signals_emitted=[],
+                extracted_results={},
                 extracted_values={},
                 reason=decision.reason or "Execution skipped by policy",
             )
 
-        # 2. 发起 HTTP 抓取
+        # 2. Fetch
         headers_to_send = dict(self.custom_headers)
         headers_to_send.update(decision.headers)
 
@@ -77,7 +80,7 @@ class GenericWebTarget:
             timeout=self.timeout,
         )
 
-        # 3. 策略后置评估
+        # 3. Policy post-evaluation
         headers_dict = {}
         if fetch_res.etag:
             headers_dict["etag"] = fetch_res.etag
@@ -92,7 +95,7 @@ class GenericWebTarget:
             now=now,
         )
 
-        # 4. 同步更新 Target 状态机
+        # 4. Update target state machine
         self.target.status = evaluation.new_status
         self.target.etag = evaluation.updated_etag
         self.target.last_modified = evaluation.updated_last_modified
@@ -100,7 +103,7 @@ class GenericWebTarget:
         self.target.next_allowed_at = evaluation.next_allowed_at
         self.target.last_fetched_at = now
 
-        # 5. 命中 304：协商缓存短路
+        # 5. 304 short circuit
         if evaluation.status_code == 304 or fetch_res.is_304_not_modified:
             if repo and hasattr(repo, "save_target"):
                 repo.save_target(self.target)
@@ -110,12 +113,13 @@ class GenericWebTarget:
                 status_code=304,
                 new_status=self.target.status,
                 signals_emitted=[],
+                extracted_results={},
                 extracted_values={},
                 is_304=True,
                 reason=evaluation.reason,
             )
 
-        # 6. 非成功状态（429/403/5xx）：持久化后返回
+        # 6. Non-success status: persist and return
         if not evaluation.should_emit_signal:
             if repo and hasattr(repo, "save_target"):
                 repo.save_target(self.target)
@@ -125,29 +129,56 @@ class GenericWebTarget:
                 status_code=evaluation.status_code,
                 new_status=self.target.status,
                 signals_emitted=[],
+                extracted_results={},
                 extracted_values={},
                 reason=evaluation.reason,
             )
 
-        # 7. HTTP 200 成功响应：执行 DOM / Regex 提取
-        extracted: Dict[str, Any] = {}
-        for ext in self.extractors:
-            extracted[ext.name] = DOMExtractor.extract(fetch_res.content, ext)
+        # 7. Successful fetch: extract fields
+        extracted_results: Dict[str, ExtractionResult] = {}
+        extracted_values: Dict[str, Any] = {}
+        has_failures = False
 
+        for ext in self.extractors:
+            result = DOMExtractor.extract(fetch_res.content, ext)
+            extracted_results[ext.name] = result
+            if not result.is_found:
+                has_failures = True
+            else:
+                extracted_values[ext.name] = result.value
+
+        # 8. Content-hash change detection with false-positive guards
         new_hash = hashlib.sha256(fetch_res.content.encode("utf-8")).hexdigest()
         prev_hash = self.target.content_hash
+        should_emit = False
+        emit_reason = "Content identical, no signal emitted"
+
+        if prev_hash is None or not self.target.metadata.get("initialized"):
+            should_emit = True
+            emit_reason = "Initial fetch"
+        elif prev_hash != new_hash:
+            # Content changed; if configured extractors all failed to match, suppress as a likely false positive
+            if self.extractors and all(not extracted_results[e.name].is_found for e in self.extractors):
+                should_emit = False
+                emit_reason = "Content changed but all configured extractors failed; suppressing as potential false positive"
+            else:
+                should_emit = True
+                emit_reason = "Content changed with at least one successful extraction"
+        else:
+            should_emit = False
+            emit_reason = "Content identical, no signal emitted"
 
         signals: List[Any] = []
-        # 首次抓取或内容 Hash 改变时产生 Signal
-        if prev_hash is None or prev_hash != new_hash or not self.target.metadata.get("initialized"):
+        if should_emit:
             self.target.content_hash = new_hash
             self.target.metadata["initialized"] = True
-            self.target.metadata["last_extracted"] = extracted
+            self.target.metadata["last_extracted"] = {k: v.value for k, v in extracted_results.items() if v.is_found}
 
             payload = {
                 "target_id": self.target.id,
                 "url": self.target.url,
-                "extracted_values": extracted,
+                "extracted_values": extracted_values,
+                "extraction_results": {k: {"status": v.status.value, "value": v.value} for k, v in extracted_results.items()},
                 "content_hash": new_hash,
                 "previous_hash": prev_hash,
                 "status_code": fetch_res.status_code,
@@ -177,14 +208,13 @@ class GenericWebTarget:
                 sig_obj = payload
 
             signals.append(sig_obj)
-
             if repo and hasattr(repo, "save_signal") and sig_obj is not None:
                 try:
                     repo.save_signal(sig_obj)
                 except Exception:
                     pass
 
-        # 8. 保存最新 target 状态到仓储
+        # 9. Persist latest target state
         if repo and hasattr(repo, "save_target"):
             repo.save_target(self.target)
 
@@ -194,7 +224,9 @@ class GenericWebTarget:
             status_code=fetch_res.status_code,
             new_status=self.target.status,
             signals_emitted=signals,
-            extracted_values=extracted,
+            extracted_results=extracted_results,
+            extracted_values=extracted_values,
             is_304=False,
-            reason="Signal emitted on content change" if signals else "Content identical, no signal emitted",
+            has_extraction_failures=has_failures,
+            reason=emit_reason,
         )

@@ -48,3 +48,26 @@ class WatcherRule:
 class RuleSet:
     version: str
     rules: List[WatcherRule] = field(default_factory=list)
+
+from enum import Enum
+
+
+class ExtractionStatus(str, Enum):
+    FOUND = "found"
+    SELECTOR_NOT_FOUND = "not_found"
+    EMPTY_AFTER_TRANSFORM = "empty"
+    MULTIPLE_MATCH = "multiple_match"
+    TRANSFORM_ERROR = "transform_error"
+
+
+@dataclass
+class ExtractionResult:
+    status: ExtractionStatus
+    raw_value: Optional[str] = None
+    value: Any = None
+    error_message: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_found(self) -> bool:
+        return self.status == ExtractionStatus.FOUND
