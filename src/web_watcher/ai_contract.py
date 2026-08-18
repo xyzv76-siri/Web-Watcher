@@ -32,7 +32,8 @@ from .ai_errors import (
     UnsupportedValueError,
 )
 from .models import Entity, Event, Signal
-from .policy import Importance, PolicyDecision
+from .importance import Importance
+from .policy import PolicyDecision
 
 
 # ---------------------------------------------------------------------------

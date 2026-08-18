@@ -3,10 +3,14 @@
 import sqlite3
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from .models import Entity, Event, FetchState, Signal
 from .storage import initialize_schema, open_database
+from .event_status import EventStatus
+from .event_types import EventType
+from .importance import Importance
+from .signal_types import SignalType
 
 
 def utc_now() -> datetime:
@@ -36,6 +40,136 @@ def _serialize_datetime(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
+
+
+
+def _signal_type_from_db(value: str) -> SignalType | str:
+    try:
+        return SignalType(value)
+    except ValueError:
+        return value
+
+
+def _event_type_from_db(value: str) -> EventType | str:
+    try:
+        return EventType(value)
+    except ValueError:
+        return value
+
+
+def _event_status_from_db(value: str) -> EventStatus | str:
+    try:
+        return EventStatus(value)
+    except ValueError:
+        return value
+
+
+def _importance_from_db(value: str) -> Importance | str:
+    try:
+        return Importance(value)
+    except ValueError:
+        return value
+
+
+def _enum_value(value):
+    return value.value if hasattr(value, "value") else value
+
+
+# --- Boundary Normalization Helpers ---
+
+def _normalize_signal_type(val: Union[SignalType, str, None]) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, SignalType):
+        return val.value
+    if isinstance(val, str):
+        cleaned = val.strip().lower()
+        for member in SignalType:
+            if member.value == cleaned:
+                return member.value
+        upper_name = val.strip().upper()
+        if upper_name in SignalType.__members__:
+            return SignalType[upper_name].value
+        return cleaned
+    return str(val)
+
+
+def _normalize_event_type(val: Union[EventType, str, None]) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, EventType):
+        return val.value
+    if isinstance(val, str):
+        cleaned = val.strip().lower()
+        for member in EventType:
+            if member.value == cleaned:
+                return member.value
+        upper_name = val.strip().upper()
+        if upper_name in EventType.__members__:
+            return EventType[upper_name].value
+        return cleaned
+    return str(val)
+
+
+def _normalize_event_status(val: Union[EventStatus, str, None]) -> Optional[str]:
+    if val is None:
+        return None
+    if isinstance(val, EventStatus):
+        return val.value
+    if isinstance(val, str):
+        cleaned = val.strip().lower()
+        if cleaned in (EventStatus.OPEN.value, "new"):
+            return EventStatus.OPEN.value
+        if cleaned in (EventStatus.CLOSED.value, "processed", "discarded"):
+            return EventStatus.CLOSED.value
+        return cleaned
+    return str(val)
+
+
+def _normalize_importance(val: Union[Importance, str, None]) -> Optional[str]:
+    if val is None:
+        return None
+    try:
+        return Importance.from_value(val).value
+    except (ValueError, KeyError, AttributeError):
+        return str(val).strip().lower()
+
+
+def _deserialize_signal_type(val: str) -> SignalType:
+    try:
+        return SignalType(val)
+    except ValueError:
+        cleaned = val.strip().lower()
+        for m in SignalType:
+            if m.value == cleaned:
+                return m
+        return SignalType.CONTENT_CHANGE
+
+
+def _deserialize_event_type(val: str) -> EventType:
+    try:
+        return EventType(val)
+    except ValueError:
+        cleaned = val.strip().lower()
+        for m in EventType:
+            if m.value == cleaned:
+                return m
+        return EventType.CONTENT_CHANGE
+
+
+def _deserialize_event_status(val: str) -> EventStatus:
+    try:
+        return EventStatus(val)
+    except ValueError:
+        norm = _normalize_event_status(val)
+        return EventStatus(norm) if norm in (EventStatus.OPEN.value, EventStatus.CLOSED.value) else EventStatus.OPEN
+
+
+def _deserialize_importance(val: str) -> Importance:
+    try:
+        return Importance.from_value(val)
+    except (ValueError, KeyError):
+        return Importance.INTERESTING
 
 
 class Repository:
@@ -118,7 +252,7 @@ class Repository:
     def create_signal(
         self,
         entity_id: int,
-        signal_type: str,
+        signal_type: Union[SignalType, str],
         observed_at: datetime,
         value: Optional[str] = None,
         fingerprint: Optional[str] = None,
@@ -138,6 +272,7 @@ class Repository:
             if observed_at.tzinfo is None
             else observed_at.isoformat()
         )
+        db_type = _normalize_signal_type(signal_type) or SignalType.CONTENT_CHANGE.value
 
         try:
             cursor = self.connection.execute(
@@ -146,13 +281,13 @@ class Repository:
                     (entity_id, signal_type, observed_at, value, fingerprint, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (entity_id, signal_type, obs, value, fingerprint, now),
+                (entity_id, db_type, obs, value, fingerprint, now),
             )
             self.connection.commit()
             return Signal(
                 id=cursor.lastrowid,
                 entity_id=entity_id,
-                signal_type=signal_type,
+                signal_type=_deserialize_signal_type(db_type),
                 observed_at=observed_at,
                 value=value,
                 fingerprint=fingerprint,
@@ -165,15 +300,16 @@ class Repository:
     def count_signals_for_entity(
         self,
         entity_id: int,
-        signal_type: Optional[str] = None,
+        signal_type: Optional[Union[SignalType, str]] = None,
     ) -> int:
-        if signal_type is not None:
+        db_type = _normalize_signal_type(signal_type) if signal_type is not None else None
+        if db_type is not None:
             row = self.connection.execute(
                 """
                 SELECT COUNT(*) as cnt FROM signals
                 WHERE entity_id = ? AND signal_type = ?
                 """,
-                (entity_id, signal_type),
+                (entity_id, db_type),
             ).fetchone()
         else:
             row = self.connection.execute(
@@ -192,14 +328,17 @@ class Repository:
     def create_event(
         self,
         entity_id: int,
-        event_type: str,
-        status: str = "open",
-        importance: str = "medium",
+        event_type: Union[EventType, str],
+        status: Union[EventStatus, str] = EventStatus.OPEN,
+        importance: Union[Importance, str] = Importance.INTERESTING,
         created_at: Optional[datetime] = None,
     ) -> Event:
         """Create a new Event for the given entity."""
         now = created_at or utc_now()
         now_iso = now.isoformat()
+        db_event_type = _normalize_event_type(event_type) or EventType.CONTENT_CHANGE.value
+        db_status = _normalize_event_status(status) or EventStatus.OPEN.value
+        db_importance = _normalize_importance(importance) or Importance.INTERESTING.value
 
         cursor = self.connection.execute(
             """
@@ -207,16 +346,16 @@ class Repository:
                 (entity_id, event_type, status, importance, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (entity_id, event_type, status, importance, now_iso, now_iso),
+            (entity_id, db_event_type, db_status, db_importance, now_iso, now_iso),
         )
         self.connection.commit()
 
         return Event(
             id=cursor.lastrowid,
             entity_id=entity_id,
-            event_type=event_type,
-            status=status,
-            importance=importance,
+            event_type=_deserialize_event_type(db_event_type),
+            status=_deserialize_event_status(db_status),
+            importance=_deserialize_importance(db_importance),
             created_at=now,
             updated_at=now,
         )
@@ -233,9 +372,9 @@ class Repository:
         return Event(
             id=row[0],
             entity_id=row[1],
-            event_type=row[2],
-            status=row[3],
-            importance=row[4],
+            event_type=_deserialize_event_type(row[2]),
+            status=_deserialize_event_status(row[3]),
+            importance=_deserialize_importance(row[4]),
             created_at=_parse_iso_datetime(row[5]) or _fallback_datetime(),
             updated_at=_parse_iso_datetime(row[6]) or _fallback_datetime(),
         )
@@ -243,8 +382,8 @@ class Repository:
     def update_event(
         self,
         event_id: int,
-        status: Optional[str] = None,
-        importance: Optional[str] = None,
+        status: Optional[Union[EventStatus, str]] = None,
+        importance: Optional[Union[Importance, str]] = None,
         updated_at: Optional[datetime] = None,
     ) -> Optional[Event]:
         """Update selected fields of an existing Event.
@@ -255,8 +394,8 @@ class Repository:
         if existing is None:
             return None
 
-        new_status = status if status is not None else existing.status
-        new_importance = importance if importance is not None else existing.importance
+        new_status = _normalize_event_status(status) if status is not None else existing.status.value
+        new_importance = _normalize_importance(importance) if importance is not None else existing.importance.value
         now = updated_at or utc_now()
 
         self.connection.execute(
@@ -273,8 +412,8 @@ class Repository:
             id=existing.id,
             entity_id=existing.entity_id,
             event_type=existing.event_type,
-            status=new_status,
-            importance=new_importance,
+            status=_deserialize_event_status(new_status),
+            importance=_deserialize_importance(new_importance),
             created_at=existing.created_at,
             updated_at=now,
         )
@@ -319,7 +458,7 @@ class Repository:
             Signal(
                 id=r["id"],
                 entity_id=r["entity_id"],
-                signal_type=r["signal_type"],
+                signal_type=_signal_type_from_db(r["signal_type"]),
                 observed_at=_parse_iso_datetime(r["observed_at"]) or _fallback_datetime(),
                 value=r["value"],
                 fingerprint=r["fingerprint"],
@@ -343,22 +482,22 @@ class Repository:
                 """
                 SELECT id, entity_id, event_type, status, importance, created_at, updated_at
                 FROM events
-                WHERE entity_id = ? AND status = 'open' AND created_at >= ?
+                WHERE entity_id = ? AND status = ? AND created_at >= ?
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (entity_id, cutoff_str),
+                (entity_id, EventStatus.OPEN.value, cutoff_str),
             ).fetchone()
         else:
             row = self.connection.execute(
                 """
                 SELECT id, entity_id, event_type, status, importance, created_at, updated_at
                 FROM events
-                WHERE entity_id = ? AND status = 'open'
+                WHERE entity_id = ? AND status = ?
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                (entity_id,),
+                (entity_id, EventStatus.OPEN.value),
             ).fetchone()
 
         if row is None:

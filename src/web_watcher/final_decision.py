@@ -25,8 +25,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
+from .importance import Importance
 from .ai_contract import AIJudgment
-from .policy import Action, Importance, PolicyDecision
+from .policy import Action, PolicyDecision
 
 
 # ---------------------------------------------------------------------------

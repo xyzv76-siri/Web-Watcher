@@ -16,9 +16,11 @@ No AI, LLM, embeddings, semantic similarity, network calls, or scheduling.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 
 from .event_types import EventType
+from .event_status import EventStatus
+from .importance import Importance
 from .signal_types import SignalType
 from .models import Event, Signal
 from .repository import Repository
@@ -30,12 +32,25 @@ class CorrelationConfig:
     def __init__(
         self,
         correlation_window_seconds: int = 24 * 3600,
-        default_importance: str = "medium",
+        default_importance: Union[Importance, str] = Importance.INTERESTING,
     ):
         if correlation_window_seconds <= 0:
             raise ValueError("correlation_window_seconds must be positive")
         self.correlation_window_seconds = correlation_window_seconds
-        self.default_importance = default_importance
+        if isinstance(default_importance, Importance):
+            self.default_importance = default_importance
+        else:
+            normalized = str(default_importance).strip().lower()
+            legacy_map = {
+                "low": Importance.IGNORE,
+                "medium": Importance.INTERESTING,
+                "high": Importance.IMPORTANT,
+                "critical": Importance.CRITICAL,
+            }
+            if normalized in legacy_map:
+                self.default_importance = legacy_map[normalized]
+            else:
+                self.default_importance = Importance.from_value(normalized)
 
     @property
     def window(self) -> timedelta:
@@ -109,7 +124,7 @@ class EventCorrelator:
         event = self._repo.create_event(
             entity_id=signal.entity_id,
             event_type=event_type,
-            status="open",
+            status=EventStatus.OPEN,
             importance=self._config.default_importance,
             created_at=signal.observed_at,
         )
@@ -121,7 +136,7 @@ class EventCorrelator:
 
         Returns the closed Event or None if not found.
         """
-        return self._repo.update_event(event_id=event_id, status="closed")
+        return self._repo.update_event(event_id=event_id, status=EventStatus.CLOSED)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -171,7 +186,7 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _derive_event_type(signal: Signal) -> str:
+def _derive_event_type(signal: Signal) -> EventType:
     """Derive a canonical event_type from a Signal's type.
 
     Phase 8 V1 mapping — deterministic, one-to-one:
@@ -182,12 +197,12 @@ def _derive_event_type(signal: Signal) -> str:
     without rewriting this layer.
     """
     mapping = {
-        SignalType.CONTENT_CHANGE.value: EventType.CONTENT_CHANGE.value,
-        SignalType.STARS_CHANGED.value: EventType.STARS_CHANGED.value,
-        SignalType.RELEASE_PUBLISHED.value: EventType.RELEASE_PUBLISHED.value,
+        SignalType.CONTENT_CHANGE: EventType.CONTENT_CHANGE,
+        SignalType.STARS_CHANGED: EventType.STARS_CHANGED,
+        SignalType.RELEASE_PUBLISHED: EventType.RELEASE_PUBLISHED,
     }
 
     return mapping.get(
         signal.signal_type,
-        EventType.CONTENT_CHANGE.value,
+        EventType.CONTENT_CHANGE,
     )

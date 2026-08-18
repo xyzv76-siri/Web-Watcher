@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from .event_status import EventStatus
+from .event_types import EventType
+from .importance import Importance
+from .signal_types import SignalType
+
 
 @dataclass(frozen=True)
 class Entity:
@@ -17,7 +22,7 @@ class Entity:
 class Signal:
     id: Optional[int]
     entity_id: int
-    signal_type: str
+    signal_type: SignalType
     observed_at: datetime
     value: Optional[str] = None
     fingerprint: Optional[str] = None
@@ -27,9 +32,9 @@ class Signal:
 class Event:
     id: Optional[int]
     entity_id: int
-    event_type: str
-    status: str
-    importance: str
+    event_type: EventType
+    status: EventStatus
+    importance: Importance
     created_at: datetime
     updated_at: datetime
 

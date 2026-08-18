@@ -9,13 +9,7 @@ from enum import Enum
 
 from .event_types import EventType
 from .models import Event
-
-
-class Importance(str, Enum):
-    IGNORE = "ignore"
-    INTERESTING = "interesting"
-    IMPORTANT = "important"
-    CRITICAL = "critical"
+from .importance import Importance
 
 
 class Action(str, Enum):

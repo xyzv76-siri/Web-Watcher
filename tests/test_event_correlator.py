@@ -27,6 +27,9 @@ from web_watcher.event_correlator import (
 )
 from web_watcher.models import Entity, Event, Signal
 from web_watcher.repository import Repository
+from web_watcher.event_status import EventStatus
+from web_watcher.event_types import EventType
+from web_watcher.importance import Importance
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +79,16 @@ class TestRepositoryEvents:
         eid = _entity_id(repo)
         ev = repo.create_event(
             entity_id=eid,
-            event_type="content_change_event",
-            status="open",
-            importance="medium",
+            event_type=EventType.CONTENT_CHANGE,
+            status=EventStatus.OPEN,
+            importance=Importance.INTERESTING,
             created_at=_ts(2026, 8, 17, 10),
         )
         assert ev.id is not None
         assert ev.entity_id == eid
-        assert ev.event_type == "content_change_event"
-        assert ev.status == "open"
-        assert ev.importance == "medium"
+        assert ev.event_type == EventType.CONTENT_CHANGE
+        assert ev.status == EventStatus.OPEN
+        assert ev.importance == Importance.INTERESTING
         repo.close()
 
     def test_get_event_returns_existing(self, tmp_path):
@@ -457,7 +460,7 @@ class TestImportanceDefault:
         correlator = EventCorrelator(repository=repo, now_factory=lambda: _ts())
         sig = _sig(id_=1, entity_id=eid, fingerprint="fp-imp")
         e = correlator.correlate(sig)
-        assert e.importance == "medium"
+        assert e.importance == Importance.INTERESTING
         repo.close()
 
     def test_custom_importance_config(self, tmp_path):
@@ -467,7 +470,7 @@ class TestImportanceDefault:
         correlator = EventCorrelator(repository=repo, config=config, now_factory=lambda: _ts())
         sig = _sig(id_=1, entity_id=eid, fingerprint="fp-imp-2")
         e = correlator.correlate(sig)
-        assert e.importance == "high"
+        assert e.importance == Importance.IMPORTANT
         repo.close()
 
 
