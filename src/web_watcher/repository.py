@@ -43,7 +43,6 @@ def _serialize_datetime(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-
 def _signal_type_from_db(value: str) -> SignalType | str:
     try:
         return SignalType(value)
@@ -169,7 +168,7 @@ def _deserialize_event_status(val: str) -> EventStatus:
 def _deserialize_importance(val: str) -> Importance:
     try:
         return Importance.from_value(val)
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, AttributeError):
         return Importance.INTERESTING
 
 
@@ -507,9 +506,9 @@ class Repository:
         return Event(
             id=row[0],
             entity_id=row[1],
-            event_type=row[2],
-            status=row[3],
-            importance=row[4],
+            event_type=_deserialize_event_type(row[2]),
+            status=_deserialize_event_status(row[3]),
+            importance=_deserialize_importance(row[4]),
             created_at=_parse_iso_datetime(row[5]) or _fallback_datetime(),
             updated_at=_parse_iso_datetime(row[6]) or _fallback_datetime(),
         )
