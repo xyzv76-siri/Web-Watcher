@@ -1,4 +1,4 @@
-"""Notification Dispatcher: polling, routing, and exponential backoff retry manager (Phase 12-B + 13-B)."""
+"""Notification Dispatcher: polling, routing, and exponential backoff retry manager (Phase 12-B + 13-B + 13-D)."""
 
 from datetime import datetime, timezone
 import json
@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from .channel_senders import BaseChannelSender, ConsoleSender, DeliveryResult
 from .models import Notification
 from .repository import Repository
+from .alert_silencer import AlertSilencer
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +26,18 @@ class NotificationDispatcher:
         base_backoff_sec: float = 1.0,
         poll_interval: float = 1.0,
         batch_size: int = 10,
+        silencer: Optional[AlertSilencer] = None,
+        repo: Optional[Repository] = None,
     ):
-        self.repository = repository
+        # 兼容旧参数名 repository 与 新参数名 repo
+        self.repository = repository or repo
         self.senders: Dict[str, BaseChannelSender] = dict(senders or {})
         self.default_sender = default_sender or ConsoleSender()
         self.max_retries = max_retries
         self.base_backoff_sec = base_backoff_sec
         self.poll_interval = poll_interval
         self.batch_size = batch_size
+        self.silencer = silencer
         self._running = False
 
     def register_sender(self, channel: str, sender: BaseChannelSender) -> None:
@@ -49,6 +54,16 @@ class NotificationDispatcher:
 
     def dispatch_one(self, notification: Notification) -> DeliveryResult:
         """Delivers a single notification and records status/retry metadata in repository."""
+        # 1. 前置告警静音/冷却拦截
+        if self.silencer:
+            is_silenced, reason = self.silencer.should_silence(notification)
+            if is_silenced:
+                if hasattr(self.repository, "mark_notification_suppressed"):
+                    self.repository.mark_notification_suppressed(notification.id, reason=reason)
+                elif hasattr(self.repository, "mark_notification_delivered"):
+                    self.repository.mark_notification_delivered(notification.id)
+                return DeliveryResult(success=True, status_code=200, response_body="suppressed")
+
         sender = self.resolve_sender(notification.channel)
         payload = dict(notification.payload or {})
         retries = payload.get("retry_count", 0)
@@ -60,6 +75,8 @@ class NotificationDispatcher:
             result = DeliveryResult(success=False, error_message=str(exc))
 
         if result.success:
+            if self.silencer:
+                self.silencer.record_dispatch(notification)
             payload["delivered_at"] = datetime.now(timezone.utc).isoformat()
             payload["delivery_response"] = result.response_body
             self.repository.update_notification_status(
