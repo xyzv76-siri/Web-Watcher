@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="web-watcher",
         description="Web Watcher: autonomous web monitoring, investigation, and notification engine",
     )
+    parser.add_argument("--version", action="version", version="web-watcher 0.1.0")
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
     # 1. worker subcommand (investigation background worker)
