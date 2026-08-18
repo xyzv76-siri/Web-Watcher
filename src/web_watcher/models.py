@@ -2,12 +2,20 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, Optional
 
 from .event_status import EventStatus
 from .event_types import EventType
 from .importance import Importance
 from .signal_types import SignalType
+
+
+class TargetStatus(str, Enum):
+    NORMAL = "normal"  # 正常巡检调度中
+    BACKOFF = "backoff"  # 发生临时网络故障/429退避中
+    COOLDOWN = "cooldown"  # 触发连续失败熔断/长周期隔离
+    RECOVERING = "recovering"  # 冷却窗口到期，试探探针状态
 
 
 @dataclass(frozen=True)
@@ -57,3 +65,22 @@ class FetchState:
     last_modified: Optional[str] = None
     content_hash: Optional[str] = None
     fetched_at: Optional[datetime] = None
+
+
+@dataclass
+class Target:
+    id: str
+    url: str
+    interval: str = "15m"
+    status: TargetStatus = TargetStatus.NORMAL
+    etag: Optional[str] = None
+    last_modified: Optional[str] = None
+    content_hash: Optional[str] = None
+    consecutive_failures: int = 0
+    last_fetched_at: Optional[datetime] = None
+    next_allowed_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = None
+
+    def __post_init__(self):
+        if self.metadata is None:
+            object.__setattr__(self, "metadata", {})

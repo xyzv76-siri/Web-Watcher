@@ -809,3 +809,146 @@ class Repository:
         self.connection.commit()
         return cursor.rowcount
 
+    def _init_target_table(self):
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS targets (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                interval TEXT NOT NULL DEFAULT '15m',
+                status TEXT NOT NULL DEFAULT 'normal',
+                etag TEXT,
+                last_modified TEXT,
+                content_hash TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                last_fetched_at TEXT,
+                next_allowed_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        self.connection.commit()
+
+    def save_target(self, target: Any) -> None:
+        self._init_target_table()
+        now_iso = utc_now_iso()
+        status_val = target.status.value if hasattr(target.status, "value") else str(target.status)
+        last_fetched_iso = _serialize_datetime(target.last_fetched_at)
+        next_allowed_iso = _serialize_datetime(target.next_allowed_at)
+        meta_json = json.dumps(target.metadata or {})
+
+        self.connection.execute("""
+            INSERT INTO targets (
+                id, url, interval, status, etag, last_modified, content_hash,
+                consecutive_failures, last_fetched_at, next_allowed_at, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                url = excluded.url,
+                interval = excluded.interval,
+                status = excluded.status,
+                etag = excluded.etag,
+                last_modified = excluded.last_modified,
+                content_hash = excluded.content_hash,
+                consecutive_failures = excluded.consecutive_failures,
+                last_fetched_at = excluded.last_fetched_at,
+                next_allowed_at = excluded.next_allowed_at,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+        """, (
+            target.id, target.url, target.interval, status_val, target.etag,
+            target.last_modified, target.content_hash, target.consecutive_failures,
+            last_fetched_iso, next_allowed_iso, meta_json, now_iso, now_iso
+        ))
+        self.connection.commit()
+
+    def get_target(self, target_id: str) -> Optional[Any]:
+        self._init_target_table()
+        from web_watcher.models import Target, TargetStatus
+        row = self.connection.execute("SELECT * FROM targets WHERE id = ?", (target_id,)).fetchone()
+        if not row:
+            return None
+        return Target(
+            id=row["id"],
+            url=row["url"],
+            interval=row["interval"],
+            status=TargetStatus(row["status"]),
+            etag=row["etag"],
+            last_modified=row["last_modified"],
+            content_hash=row["content_hash"],
+            consecutive_failures=row["consecutive_failures"],
+            last_fetched_at=_parse_iso_datetime(row["last_fetched_at"]),
+            next_allowed_at=_parse_iso_datetime(row["next_allowed_at"]),
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    def list_targets(self) -> List[Any]:
+        self._init_target_table()
+        from web_watcher.models import Target, TargetStatus
+        rows = self.connection.execute("SELECT * FROM targets ORDER BY id ASC").fetchall()
+        return [
+            Target(
+                id=r["id"],
+                url=r["url"],
+                interval=r["interval"],
+                status=TargetStatus(r["status"]),
+                etag=r["etag"],
+                last_modified=r["last_modified"],
+                content_hash=r["content_hash"],
+                consecutive_failures=r["consecutive_failures"],
+                last_fetched_at=_parse_iso_datetime(r["last_fetched_at"]),
+                next_allowed_at=_parse_iso_datetime(r["next_allowed_at"]),
+                metadata=json.loads(r["metadata_json"] or "{}"),
+            )
+            for r in rows
+        ]
+
+    def update_target_status(
+        self,
+        target_id: str,
+        status: Any,
+        consecutive_failures: Optional[int] = None,
+        next_allowed_at: Optional[datetime] = None,
+    ) -> None:
+        self._init_target_table()
+        status_val = status.value if hasattr(status, "value") else str(status)
+        now_iso = utc_now_iso()
+        next_iso = _serialize_datetime(next_allowed_at)
+
+        if consecutive_failures is not None:
+            self.connection.execute("""
+                UPDATE targets SET
+                    status = ?,
+                    consecutive_failures = ?,
+                    next_allowed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (status_val, consecutive_failures, next_iso, now_iso, target_id))
+        else:
+            self.connection.execute("""
+                UPDATE targets SET
+                    status = ?,
+                    next_allowed_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (status_val, next_iso, now_iso, target_id))
+        self.connection.commit()
+
+    def list_schedulable_targets(self, now: Optional[datetime] = None) -> List[Any]:
+        self._init_target_table()
+        from web_watcher.models import Target, TargetStatus
+        now = now or utc_now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        targets = self.list_targets()
+        schedulable = []
+        for t in targets:
+            # 1. 如果有明确的冷却/退避倒计时，未到期则不可调度
+            if t.next_allowed_at and now < t.next_allowed_at:
+                continue
+            # 2. 如果处于 COOLDOWN 且倒计时已到期，自动迁移至 RECOVERING (允许单次探针)
+            if t.status == TargetStatus.COOLDOWN:
+                t.status = TargetStatus.RECOVERING
+                self.update_target_status(t.id, TargetStatus.RECOVERING)
+            schedulable.append(t)
+        return schedulable
+
