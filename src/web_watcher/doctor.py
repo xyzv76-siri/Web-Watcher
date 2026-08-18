@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+from web_watcher.config import AppConfig
 from web_watcher.repository import Repository
 
 
@@ -17,9 +18,10 @@ class DiagnosticResult:
 class SystemDoctor:
     """系统健康诊断与自检引擎"""
 
-    def __init__(self, repo: Optional[Repository] = None, db_path: Optional[str] = None):
+    def __init__(self, repo: Optional[Repository] = None, db_path: Optional[str] = None, config: Optional[AppConfig] = None):
         self.repo = repo
-        self.db_path = db_path or (getattr(repo, "db_path", None) if repo else None) or "web_watcher.db"
+        self.config = config
+        self.db_path = db_path or (getattr(repo, "db_path", None) if repo else None) or (config.db_path if config else "web_watcher.db")
 
     def check_database(self) -> DiagnosticResult:
         path = Path(self.db_path)

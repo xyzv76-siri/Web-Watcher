@@ -14,6 +14,7 @@ from .notification_dispatcher import NotificationDispatcher
 from .pipeline_runner import PipelineRunner
 from .repository import Repository
 from .doctor import SystemDoctor
+from .config import get_config, AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -247,10 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def handle_worker(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
-    batch_size = getattr(args, "batch_size", 10)
-    interval = getattr(args, "interval", 1.0)
+def handle_worker(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    batch_size = getattr(args, "batch_size", config.default_batch_size)
+    interval = getattr(args, "interval", config.default_poll_interval)
     run_once = getattr(args, "once", False)
 
     repo = Repository(db_path)
@@ -275,22 +276,28 @@ def handle_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_dispatcher(repo: Repository, webhook_url: Optional[str]) -> NotificationDispatcher:
-    dispatcher = NotificationDispatcher(repository=repo)
+def _build_dispatcher(repo: Repository, webhook_url: Optional[str], config: AppConfig) -> NotificationDispatcher:
+    dispatcher = NotificationDispatcher(
+        repository=repo,
+        max_retries=config.default_max_retries,
+        base_backoff_sec=config.default_base_backoff_sec,
+        poll_interval=config.default_poll_interval,
+        batch_size=config.default_batch_size,
+    )
     if webhook_url:
         dispatcher.register_sender("webhook", WebhookSender(webhook_url=webhook_url))
     return dispatcher
 
 
-def handle_notify(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
-    batch_size = getattr(args, "batch_size", 10)
-    interval = getattr(args, "interval", 1.0)
+def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    batch_size = getattr(args, "batch_size", config.default_batch_size)
+    interval = getattr(args, "interval", config.default_poll_interval)
     webhook_url = getattr(args, "webhook_url", None)
     run_once = getattr(args, "once", False)
 
     repo = Repository(db_path)
-    dispatcher = _build_dispatcher(repo, webhook_url)
+    dispatcher = _build_dispatcher(repo, webhook_url, config)
 
     if run_once:
         count = dispatcher.run_once()
@@ -307,9 +314,9 @@ def handle_notify(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_run(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
-    interval = getattr(args, "interval", 5.0)
+def handle_run(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    interval = getattr(args, "interval", config.default_poll_interval)
     run_once = getattr(args, "once", False)
     auto_inv = getattr(args, "auto_investigate", False)
     auto_deliver = getattr(args, "auto_deliver", False)
@@ -317,7 +324,7 @@ def handle_run(args: argparse.Namespace) -> int:
     channel = getattr(args, "channel", "webhook")
 
     repo = Repository(db_path)
-    dispatcher = _build_dispatcher(repo, webhook_url) if auto_deliver else None
+    dispatcher = _build_dispatcher(repo, webhook_url, config) if auto_deliver else None
 
     correlator = EventCorrelator(
         repository=repo,
@@ -330,6 +337,7 @@ def handle_run(args: argparse.Namespace) -> int:
         auto_notify=True,
         auto_deliver=auto_deliver,
         notify_channel=channel,
+        config=config,
     )
     print(f"Pipeline run initialized (auto_investigate={auto_inv}, auto_deliver={auto_deliver}, db={db_path}).")
     if run_once:
@@ -345,16 +353,16 @@ def handle_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_daemon(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
-    interval = getattr(args, "interval", 5.0)
+def handle_daemon(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    interval = getattr(args, "interval", config.default_poll_interval)
     auto_inv = getattr(args, "auto_investigate", False)
     auto_deliver = getattr(args, "auto_deliver", False)
     webhook_url = getattr(args, "webhook_url", None)
     channel = getattr(args, "channel", "webhook")
 
     repo = Repository(db_path)
-    dispatcher = _build_dispatcher(repo, webhook_url) if auto_deliver else None
+    dispatcher = _build_dispatcher(repo, webhook_url, config) if auto_deliver else None
 
     correlator = EventCorrelator(
         repository=repo,
@@ -367,6 +375,7 @@ def handle_daemon(args: argparse.Namespace) -> int:
         auto_notify=True,
         auto_deliver=auto_deliver,
         notify_channel=channel,
+        config=config,
     )
     print(f"Starting web-watcher daemon (interval={interval}s, auto_investigate={auto_inv}, db={db_path})...")
     print("Press Ctrl+C to stop.")
@@ -378,8 +387,8 @@ def handle_daemon(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_export(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
+def handle_export(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
     fmt = getattr(args, "format", "markdown")
     since = getattr(args, "since", "24h")
     output = getattr(args, "output", None)
@@ -401,8 +410,8 @@ def handle_export(args: argparse.Namespace) -> int:
     return 0
 
 
-def handle_doctor(args: argparse.Namespace) -> int:
-    db_path = getattr(args, "db_path", "web_watcher.db")
+def handle_doctor(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
     verbose = getattr(args, "verbose", False)
 
     repo = None
@@ -411,7 +420,7 @@ def handle_doctor(args: argparse.Namespace) -> int:
     except Exception:
         pass
 
-    doctor = SystemDoctor(repo=repo, db_path=db_path)
+    doctor = SystemDoctor(repo=repo, db_path=db_path, config=config)
     results = doctor.run_all()
     report = doctor.render_report(results)
     if verbose:
@@ -427,19 +436,20 @@ def handle_doctor(args: argparse.Namespace) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    config = get_config()
 
     if args.command == "worker":
-        return handle_worker(args)
+        return handle_worker(args, config)
     if args.command == "notify":
-        return handle_notify(args)
+        return handle_notify(args, config)
     if args.command == "run":
-        return handle_run(args)
+        return handle_run(args, config)
     if args.command == "daemon":
-        return handle_daemon(args)
+        return handle_daemon(args, config)
     if args.command == "export":
-        return handle_export(args)
+        return handle_export(args, config)
     if args.command == "doctor":
-        return handle_doctor(args)
+        return handle_doctor(args, config)
 
     parser.print_help()
     return 0

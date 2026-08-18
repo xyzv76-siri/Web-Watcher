@@ -9,6 +9,7 @@ from .models import Entity, Event, Notification, Signal
 from .notification_dispatcher import NotificationDispatcher
 from .notification_enricher import NotificationEnricher
 from .repository import Repository
+from .config import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,10 @@ class PipelineRunner:
         investigation_adapter: Optional[Any] = None,
         planner: Optional[Any] = None,
         engine: Optional[Any] = None,
+        config: Optional[AppConfig] = None,
     ):
         self.repository = repository
+        self.config = config
         self.correlator = correlator or EventCorrelator(
             repository=repository,
             auto_investigate=auto_investigate,

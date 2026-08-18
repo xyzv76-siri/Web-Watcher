@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from web_watcher.cli import build_parser, handle_worker, main
+from web_watcher.config import AppConfig
 
 
 def test_build_parser_worker_defaults():
@@ -35,7 +36,7 @@ def test_handle_worker_once_mode(mock_repo_cls, mock_worker_cls, capsys):
 
     parser = build_parser()
     args = parser.parse_args(["worker", "--once", "--db", ":memory:"])
-    exit_code = handle_worker(args)
+    exit_code = handle_worker(args, AppConfig())
 
     assert exit_code == 0
     mock_worker.run_once.assert_called_once()
@@ -53,7 +54,7 @@ def test_handle_worker_interrupt_handling(mock_repo_cls, mock_worker_cls, capsys
 
     parser = build_parser()
     args = parser.parse_args(["worker"])
-    exit_code = handle_worker(args)
+    exit_code = handle_worker(args, AppConfig())
 
     assert exit_code == 0
     mock_worker.stop.assert_called_once()

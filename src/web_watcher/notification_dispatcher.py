@@ -10,6 +10,7 @@ from .channel_senders import BaseChannelSender, ConsoleSender, DeliveryResult
 from .models import Notification
 from .repository import Repository
 from .alert_silencer import AlertSilencer
+from .config import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +23,23 @@ class NotificationDispatcher:
         repository: Repository,
         senders: Optional[Dict[str, BaseChannelSender]] = None,
         default_sender: Optional[BaseChannelSender] = None,
-        max_retries: int = 3,
-        base_backoff_sec: float = 1.0,
-        poll_interval: float = 1.0,
-        batch_size: int = 10,
+        max_retries: Optional[int] = None,
+        base_backoff_sec: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+        batch_size: Optional[int] = None,
         silencer: Optional[AlertSilencer] = None,
         repo: Optional[Repository] = None,
+        config: Optional[AppConfig] = None,
     ):
         # 兼容旧参数名 repository 与 新参数名 repo
         self.repository = repository or repo
         self.senders: Dict[str, BaseChannelSender] = dict(senders or {})
         self.default_sender = default_sender or ConsoleSender()
-        self.max_retries = max_retries
-        self.base_backoff_sec = base_backoff_sec
-        self.poll_interval = poll_interval
-        self.batch_size = batch_size
+        self.config = config
+        self.max_retries = max_retries if max_retries is not None else (config.default_max_retries if config else 3)
+        self.base_backoff_sec = base_backoff_sec if base_backoff_sec is not None else (config.default_base_backoff_sec if config else 1.0)
+        self.poll_interval = poll_interval if poll_interval is not None else (config.default_poll_interval if config else 1.0)
+        self.batch_size = batch_size if batch_size is not None else (config.default_batch_size if config else 10)
         self.silencer = silencer
         self._running = False
 
