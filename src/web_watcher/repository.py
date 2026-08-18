@@ -757,3 +757,39 @@ class Repository:
                 )
             )
         return results
+
+    def get_pending_notifications(self, limit: int = 10) -> list[Notification]:
+        cursor = self.connection.execute(
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE status IN ('pending', 'retry_pending') ORDER BY created_at ASC LIMIT ?",
+            (limit,),
+        )
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                Notification(
+                    id=row["id"],
+                    event_id=row["event_id"],
+                    channel=row["channel"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                    sent_at=row["sent_at"],
+                    payload=json.loads(row["payload"]) if row["payload"] else None,
+                )
+            )
+        return results
+
+    def update_notification_status(
+        self,
+        notification_id: int,
+        status: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        updates = ["status = ?"]
+        params: list[Any] = [str(status)]
+        if payload is not None:
+            updates.append("payload = ?")
+            params.append(json.dumps(payload))
+        params.append(notification_id)
+        with self.connection:
+            self.connection.execute(f"UPDATE notifications SET {', '.join(updates)} WHERE id = ?", params)
+
