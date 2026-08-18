@@ -1,4 +1,4 @@
-"""Notification Dispatcher: polling, routing, and exponential backoff retry manager (Phase 12-B)."""
+"""Notification Dispatcher: polling, routing, and exponential backoff retry manager (Phase 12-B + 13-B)."""
 
 from datetime import datetime, timezone
 import json
@@ -44,6 +44,10 @@ class NotificationDispatcher:
         return self.senders.get(channel, self.default_sender)
 
     def dispatch(self, notification: Notification) -> DeliveryResult:
+        """Delivers a single notification and records status/retry metadata in repository."""
+        return self.dispatch_one(notification)
+
+    def dispatch_one(self, notification: Notification) -> DeliveryResult:
         """Delivers a single notification and records status/retry metadata in repository."""
         sender = self.resolve_sender(notification.channel)
         payload = dict(notification.payload or {})

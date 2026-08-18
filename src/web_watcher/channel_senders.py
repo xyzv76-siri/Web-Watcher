@@ -1,4 +1,4 @@
-"""Notification Channel Senders: Multi-channel delivery adapters (Phase 12-A)."""
+"""Notification Channel Senders: Multi-channel delivery adapters (Phase 12-A + 13-B)."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -9,6 +9,13 @@ import urllib.request
 from typing import Any, Dict, Optional
 
 from .models import Notification
+from .card_formatters import (
+    BaseCardFormatter,
+    SlackBlockKitFormatter,
+    LarkCardFormatter,
+    DingTalkCardFormatter,
+    get_card_formatter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,99 @@ class WebhookSender(BaseChannelSender):
         }).encode("utf-8")
 
         req = urllib.request.Request(self.webhook_url, data=data, headers=self.headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.getcode()
+                body = resp.read().decode("utf-8")
+                return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
+        except urllib.error.HTTPError as exc:
+            return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+
+class SlackSender(WebhookSender):
+    """Delivers notifications using Slack Block Kit payload format."""
+
+    def __init__(self, webhook_url: Optional[str] = None, timeout: float = 10.0):
+        super().__init__(webhook_url=webhook_url or "", timeout=timeout)
+        self._formatter = SlackBlockKitFormatter()
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        payload = notification.payload or {}
+        target_url = payload.get("recipient") or self.webhook_url
+        if not target_url:
+            return DeliveryResult(success=False, error_message="Webhook URL is not configured")
+
+        data = self._formatter.format(notification)
+        req = urllib.request.Request(
+            target_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.getcode()
+                body = resp.read().decode("utf-8")
+                return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
+        except urllib.error.HTTPError as exc:
+            return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+
+class LarkSender(WebhookSender):
+    """Delivers notifications using Lark/Feishu interactive card payload format."""
+
+    def __init__(self, webhook_url: Optional[str] = None, timeout: float = 10.0):
+        super().__init__(webhook_url=webhook_url or "", timeout=timeout)
+        self._formatter = LarkCardFormatter()
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        payload = notification.payload or {}
+        target_url = payload.get("recipient") or self.webhook_url
+        if not target_url:
+            return DeliveryResult(success=False, error_message="Webhook URL is not configured")
+
+        data = self._formatter.format(notification)
+        req = urllib.request.Request(
+            target_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                status = resp.getcode()
+                body = resp.read().decode("utf-8")
+                return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
+        except urllib.error.HTTPError as exc:
+            return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+
+class DingTalkSender(WebhookSender):
+    """Delivers notifications using DingTalk Markdown payload format."""
+
+    def __init__(self, webhook_url: Optional[str] = None, timeout: float = 10.0):
+        super().__init__(webhook_url=webhook_url or "", timeout=timeout)
+        self._formatter = DingTalkCardFormatter()
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        payload = notification.payload or {}
+        target_url = payload.get("recipient") or self.webhook_url
+        if not target_url:
+            return DeliveryResult(success=False, error_message="Webhook URL is not configured")
+
+        data = self._formatter.format(notification)
+        req = urllib.request.Request(
+            target_url,
+            data=json.dumps(data).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 status = resp.getcode()
