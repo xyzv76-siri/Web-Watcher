@@ -793,3 +793,19 @@ class Repository:
         with self.connection:
             self.connection.execute(f"UPDATE notifications SET {', '.join(updates)} WHERE id = ?", params)
 
+    def delete_old_events(self, cutoff: datetime) -> int:
+        cursor = self.connection.execute(
+            "DELETE FROM events WHERE created_at < ?",
+            (_serialize_datetime(cutoff),),
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
+    def delete_old_notifications(self, cutoff: datetime) -> int:
+        cursor = self.connection.execute(
+            "DELETE FROM notifications WHERE created_at < ?",
+            (_serialize_datetime(cutoff),),
+        )
+        self.connection.commit()
+        return cursor.rowcount
+
