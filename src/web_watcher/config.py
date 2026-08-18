@@ -15,6 +15,8 @@ class AppConfig:
     default_base_backoff_sec: float = 1.0
     log_level: str = "INFO"
     webhook_url: Optional[str] = None
+    retention_max_age_days: int = 30
+    retention_dry_run: bool = False
 
 
 def get_config() -> AppConfig:
@@ -28,4 +30,6 @@ def get_config() -> AppConfig:
         default_base_backoff_sec=float(os.getenv("WEB_WATCHER_BASE_BACKOFF", "1.0")),
         log_level=os.getenv("WEB_WATCHER_LOG_LEVEL", "INFO"),
         webhook_url=os.getenv("WEB_WATCHER_WEBHOOK_URL"),
+        retention_max_age_days=int(os.getenv("WEB_WATCHER_RETENTION_MAX_AGE_DAYS", "30")),
+        retention_dry_run=os.getenv("WEB_WATCHER_RETENTION_DRY_RUN", "false").lower() in ("1", "true", "yes"),
     )

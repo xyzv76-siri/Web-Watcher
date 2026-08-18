@@ -11,6 +11,7 @@ from .models import Notification
 from .repository import Repository
 from .alert_silencer import AlertSilencer
 from .config import AppConfig
+from .retention import RetentionManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class NotificationDispatcher:
 
     def __init__(
         self,
-        repository: Repository,
+        repository: Optional[Repository] = None,
         senders: Optional[Dict[str, BaseChannelSender]] = None,
         default_sender: Optional[BaseChannelSender] = None,
         max_retries: Optional[int] = None,
@@ -30,12 +31,14 @@ class NotificationDispatcher:
         silencer: Optional[AlertSilencer] = None,
         repo: Optional[Repository] = None,
         config: Optional[AppConfig] = None,
+        retention_manager: Optional[RetentionManager] = None,
     ):
         # 兼容旧参数名 repository 与 新参数名 repo
         self.repository = repository or repo
         self.senders: Dict[str, BaseChannelSender] = dict(senders or {})
         self.default_sender = default_sender or ConsoleSender()
         self.config = config
+        self.retention_manager = retention_manager
         self.max_retries = max_retries if max_retries is not None else (config.default_max_retries if config else 3)
         self.base_backoff_sec = base_backoff_sec if base_backoff_sec is not None else (config.default_base_backoff_sec if config else 1.0)
         self.poll_interval = poll_interval if poll_interval is not None else (config.default_poll_interval if config else 1.0)
@@ -130,13 +133,17 @@ class NotificationDispatcher:
             for r in rows
         ]
 
-    def run_once(self) -> int:
+    def run_once(self, trigger_retention: bool = False) -> int:
         """Processes a single batch of pending notifications. Returns count of dispatched items."""
         notifications = self.fetch_pending(limit=self.batch_size)
         processed = 0
         for notif in notifications:
             self.dispatch(notif)
             processed += 1
+
+        if trigger_retention and self.retention_manager:
+            self.retention_manager.cleanup_old_records()
+
         return processed
 
     def run_forever(self) -> None:

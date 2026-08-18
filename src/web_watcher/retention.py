@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass
+from web_watcher.config import AppConfig
 from web_watcher.repository import Repository
 
 
@@ -16,9 +17,23 @@ class RetentionPolicy:
 class RetentionManager:
     """Enforces data retention policies on the repository."""
 
-    def __init__(self, repo: Repository, policy: Optional[RetentionPolicy] = None):
+    def __init__(
+        self,
+        repo: Repository,
+        policy: Optional[RetentionPolicy] = None,
+        config: Optional[AppConfig] = None,
+    ):
         self.repo = repo
-        self.policy = policy or RetentionPolicy()
+        self.config = config
+        if policy is not None:
+            self.policy = policy
+        elif config is not None:
+            self.policy = RetentionPolicy(
+                max_age_days=config.retention_max_age_days,
+                dry_run=config.retention_dry_run,
+            )
+        else:
+            self.policy = RetentionPolicy()
 
     def enforce(self) -> dict:
         """Apply retention policy and return a summary of actions taken."""
@@ -36,3 +51,7 @@ class RetentionManager:
             summary["deleted_notifications"] = self.repo.delete_old_notifications(cutoff=cutoff)
 
         return summary
+
+    def cleanup_old_records(self) -> dict:
+        """Alias for enforce(), kept for backward compatibility with existing call sites."""
+        return self.enforce()

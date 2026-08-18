@@ -14,6 +14,7 @@ from .notification_dispatcher import NotificationDispatcher
 from .pipeline_runner import PipelineRunner
 from .repository import Repository
 from .doctor import SystemDoctor
+from .retention import RetentionManager, RetentionPolicy
 from .config import get_config, AppConfig
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 7. retention subcommand (Phase 16-B)
+    retention_parser = subparsers.add_parser(
+        "retention",
+        help="Enforce data retention policy",
+    )
+    retention_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview deletion counts without removing data",
+    )
+    retention_parser.add_argument(
+        "--max-age-days",
+        "--days",
+        dest="max_age_days",
+        type=int,
+        default=None,
+        help="Override retention max age in days (default: from AppConfig)",
+    )
+    retention_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     return parser
 
 
@@ -433,6 +461,24 @@ def handle_doctor(args: argparse.Namespace, config: AppConfig) -> int:
     return 1 if any(r.status == "FAIL" for r in results) else 0
 
 
+def handle_retention(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    dry_run = getattr(args, "dry_run", False)
+    max_age_days = getattr(args, "max_age_days", None)
+
+    repo = Repository(db_path)
+    policy = RetentionPolicy(
+        max_age_days=max_age_days if max_age_days is not None else config.retention_max_age_days,
+        dry_run=dry_run,
+    )
+    manager = RetentionManager(repo=repo, policy=policy)
+    summary = manager.enforce()
+
+    action = "Would delete" if summary["dry_run"] else "Deleted"
+    print(f"{action} {summary['deleted_events']} event(s) and {summary['deleted_notifications']} notification(s).")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -450,6 +496,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_export(args, config)
     if args.command == "doctor":
         return handle_doctor(args, config)
+    if args.command == "retention":
+        return handle_retention(args, config)
 
     parser.print_help()
     return 0
