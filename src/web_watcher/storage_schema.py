@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     sent_at TEXT,
+    payload TEXT,
     FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
     UNIQUE(event_id, channel)
 );

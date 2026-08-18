@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .event_status import EventStatus
 from .event_types import EventType
@@ -47,6 +47,7 @@ class Notification:
     status: str
     created_at: datetime
     sent_at: Optional[datetime] = None
+    payload: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

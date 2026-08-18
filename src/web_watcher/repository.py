@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Union, Dict, List, Any
 
-from .models import Entity, Event, FetchState, Signal
+from .models import Entity, Event, FetchState, Notification, Signal
 from .storage import initialize_schema, open_database
 from .event_status import EventStatus
 from .event_types import EventType
@@ -663,3 +663,75 @@ class Repository:
         if not row:
             return None
         return self.get_investigation_result(row["id"])
+
+    def create_notification(
+        self,
+        event_id: int,
+        channel: str,
+        status: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> "Notification":
+        """Persist a notification and return the Notification model."""
+        now = utc_now_iso()
+        cursor = self.connection.execute(
+            """
+            INSERT INTO notifications (event_id, channel, status, created_at, sent_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                channel,
+                status,
+                now,
+                None,
+                json.dumps(payload, default=str) if payload is not None else None,
+            ),
+        )
+        self.connection.commit()
+        return Notification(
+            id=cursor.lastrowid,
+            event_id=event_id,
+            channel=channel,
+            status=status,
+            created_at=now,
+            sent_at=None,
+            payload=payload,
+        )
+
+    def get_notification(self, notification_id: int) -> Optional[Notification]:
+        cursor = self.connection.execute(
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE id = ?",
+            (notification_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return Notification(
+            id=row["id"],
+            event_id=row["event_id"],
+            channel=row["channel"],
+            status=row["status"],
+            created_at=row["created_at"],
+            sent_at=row["sent_at"],
+            payload=json.loads(row["payload"]) if row["payload"] else None,
+        )
+
+    def list_notifications_for_event(self, event_id: int) -> list[Notification]:
+        cursor = self.connection.execute(
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE event_id = ? ORDER BY created_at DESC",
+            (event_id,),
+        )
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                Notification(
+                    id=row["id"],
+                    event_id=row["event_id"],
+                    channel=row["channel"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                    sent_at=row["sent_at"],
+                    payload=json.loads(row["payload"]) if row["payload"] else None,
+                )
+            )
+        return results
