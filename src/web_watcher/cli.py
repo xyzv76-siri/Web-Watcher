@@ -13,6 +13,7 @@ from .investigation_worker import InvestigationWorker
 from .notification_dispatcher import NotificationDispatcher
 from .pipeline_runner import PipelineRunner
 from .repository import Repository
+from .doctor import SystemDoctor
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 6. doctor subcommand (Phase 14-B)
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run system health self-check and diagnostics",
+    )
+    doctor_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show detailed self-check output",
+    )
+    doctor_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     return parser
 
 
@@ -379,6 +400,29 @@ def handle_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_doctor(args: argparse.Namespace) -> int:
+    db_path = getattr(args, "db_path", "web_watcher.db")
+    verbose = getattr(args, "verbose", False)
+
+    repo = None
+    try:
+        repo = Repository(db_path)
+    except Exception:
+        pass
+
+    doctor = SystemDoctor(repo=repo, db_path=db_path)
+    results = doctor.run_all()
+    report = doctor.render_report(results)
+    if verbose:
+        for r in results:
+            print(f"[{r.status}] {r.name}: {r.message}")
+            if r.details:
+                for k, v in r.details.items():
+                    print(f"    {k}: {v}")
+    print(report)
+    return 1 if any(r.status == "FAIL" for r in results) else 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -393,6 +437,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_daemon(args)
     if args.command == "export":
         return handle_export(args)
+    if args.command == "doctor":
+        return handle_doctor(args)
 
     parser.print_help()
     return 0
