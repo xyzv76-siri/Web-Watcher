@@ -670,33 +670,55 @@ class Repository:
         channel: str,
         status: str,
         payload: Optional[Dict[str, Any]] = None,
-    ) -> "Notification":
-        """Persist a notification and return the Notification model."""
+    ) -> Optional["Notification"]:
+        """Persist a notification and return the Notification model.
+
+        Returns the existing notification if one already exists for the same event_id and channel.
+        """
         now = utc_now_iso()
-        cursor = self.connection.execute(
-            """
-            INSERT INTO notifications (event_id, channel, status, created_at, sent_at, payload)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_id,
-                channel,
-                status,
-                now,
-                None,
-                json.dumps(payload, default=str) if payload is not None else None,
-            ),
-        )
-        self.connection.commit()
-        return Notification(
-            id=cursor.lastrowid,
-            event_id=event_id,
-            channel=channel,
-            status=status,
-            created_at=now,
-            sent_at=None,
-            payload=payload,
-        )
+        try:
+            cursor = self.connection.execute(
+                """
+                INSERT INTO notifications (event_id, channel, status, created_at, sent_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    channel,
+                    status,
+                    now,
+                    None,
+                    json.dumps(payload, default=str) if payload is not None else None,
+                ),
+            )
+            self.connection.commit()
+            return Notification(
+                id=cursor.lastrowid,
+                event_id=event_id,
+                channel=channel,
+                status=status,
+                created_at=now,
+                sent_at=None,
+                payload=payload,
+            )
+        except sqlite3.IntegrityError:
+            self.connection.rollback()
+            cursor = self.connection.execute(
+                "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE event_id = ? AND channel = ?",
+                (event_id, channel),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return Notification(
+                id=row["id"],
+                event_id=row["event_id"],
+                channel=row["channel"],
+                status=row["status"],
+                created_at=row["created_at"],
+                sent_at=row["sent_at"],
+                payload=json.loads(row["payload"]) if row["payload"] else None,
+            )
 
     def get_notification(self, notification_id: int) -> Optional[Notification]:
         cursor = self.connection.execute(
