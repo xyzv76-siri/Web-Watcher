@@ -12,7 +12,7 @@ import sqlite3
 
 from web_watcher.adapters import AdapterRegistry
 from web_watcher.content_hash import sha256_of
-from web_watcher.fetch import FetchRequest, FetchResult
+from web_watcher.fetch import FetchRequest, FetchResult, FetchStatus
 from web_watcher.fingerprint import fingerprint_for_signal, signal_fingerprint
 from web_watcher.fetch_service import FetchService
 from web_watcher.models import Entity, FetchState
@@ -45,10 +45,16 @@ def _mk_target(**overrides):
 
 
 def _mk_result(content: str = '{"name":"hello"}', **overrides):
+    status_code = overrides.get("status_code", 200)
+    if status_code == 304:
+        status = FetchStatus.NOT_MODIFIED
+    else:
+        status = FetchStatus.SUCCESS
+
     defaults = {
         "target_key": "github:octocat/Hello-World",
-        "success": True,
-        "status_code": 200,
+        "status": status,
+        "status_code": status_code,
         "fetched_at": _now(),
         "content": content,
         "content_type": "application/json",
@@ -322,7 +328,7 @@ class Test304Behaviour:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:octocat/Hello-World",
-                    success=True,
+                    status=FetchStatus.NOT_MODIFIED,
                     status_code=304,
                     fetched_at=_now(),
                     content=None,
@@ -356,7 +362,7 @@ class Test304Behaviour:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:octocat/Hello-World",
-                    success=True,
+                    status=FetchStatus.NOT_MODIFIED,
                     status_code=304,
                     fetched_at=_now(),
                     content=None,
@@ -411,7 +417,7 @@ class TestFailedFetch:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:octocat/Hello-World",
-                    success=False,
+                    status=FetchStatus.HTTP_ERROR,
                     status_code=500,
                     fetched_at=_now(),
                     error="Server Error",
@@ -442,7 +448,7 @@ class TestFailedFetch:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:octocat/Hello-World",
-                    success=False,
+                    status=FetchStatus.RATE_LIMITED,
                     status_code=429,
                     fetched_at=_now(),
                     error="Rate Limited",
@@ -638,7 +644,7 @@ class TestRegression:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:octocat/Hello-World",
-                    success=True,
+                    status=FetchStatus.SUCCESS,
                     status_code=204,
                     fetched_at=_now(),
                     content=None,

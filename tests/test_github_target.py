@@ -2,6 +2,7 @@ import json
 from unittest.mock import MagicMock
 from datetime import datetime
 from web_watcher.models import Target, TargetStatus
+from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.github_target import GitHubTarget, parse_github_repo
 
@@ -31,7 +32,10 @@ def test_github_target_release_published_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )
@@ -54,8 +58,11 @@ def test_github_target_no_release_signal_when_unchanged():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.NOT_MODIFIED,
         status_code=304,
-        is_304_not_modified=True,
+        fetched_at=datetime.utcnow(),
+        content=None,
         etag='"rel-etag-210"',
     )
 
@@ -72,7 +79,10 @@ def test_github_target_star_delta_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(REPO_META_PAYLOAD),
         etag='"repo-etag-3500"',
     )
@@ -95,7 +105,10 @@ def test_github_target_star_delta_below_threshold():
     repo_payload["stargazers_count"] = 3502
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(repo_payload),
         etag='"repo-etag-3502"',
     )
@@ -127,7 +140,10 @@ def test_github_target_repo_saves_target_and_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_save",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )
@@ -154,8 +170,22 @@ def test_github_target_mixed_watch_types_emits_both_signals():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.side_effect = [
-        FetchResult(status_code=200, content=json.dumps(RELEASE_PAYLOAD), etag='"rel-etag-210"'),
-        FetchResult(status_code=200, content=json.dumps(REPO_META_PAYLOAD), etag='"repo-etag-3500"'),
+        FetchResult(
+            target_key="gh_mixed",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps(RELEASE_PAYLOAD),
+            etag='"rel-etag-210"',
+        ),
+        FetchResult(
+            target_key="gh_mixed",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps(REPO_META_PAYLOAD),
+            etag='"repo-etag-3500"',
+        ),
     ]
 
     res = adapter.execute(fetcher=mock_fetcher)
@@ -173,7 +203,10 @@ def test_github_target_token_added_to_headers():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_token",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )

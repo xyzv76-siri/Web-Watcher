@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from urllib.error import HTTPError, URLError
 
-from web_watcher.fetch import FetchRequest, FetchResult
+from web_watcher.fetch import FetchRequest, FetchResult, FetchStatus
 from web_watcher.github_repository_adapter import (
     GitHubRepositoryAdapter,
     _GITHUB_API_BASE,
@@ -310,7 +310,8 @@ class Test304NotModified:
             last_modified="Mon, 30 Dec 2025 00:00:00 GMT",
         ))
 
-        assert result.success is True
+        assert result.status == FetchStatus.NOT_MODIFIED
+        assert result.success is False
         assert result.status_code == 304
         assert result.content is None
         assert result.etag == "w/\"old-etag\""

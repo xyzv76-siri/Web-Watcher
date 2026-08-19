@@ -7,6 +7,7 @@ import pytest
 from web_watcher.fetch import (
     FetchRequest,
     FetchResult,
+    FetchStatus,
     Fetcher,
     SourceAdapter,
     select_adapter,
@@ -68,18 +69,19 @@ class TestFetchResult:
     def test_success_result_minimal(self):
         result = FetchResult(
             target_key="github:example/project",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
         )
         assert result.success is True
+        assert result.status == FetchStatus.SUCCESS
         assert result.status_code == 200
         assert result.error is None
 
     def test_success_result_with_content(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
             content="<html></html>",
@@ -91,19 +93,20 @@ class TestFetchResult:
     def test_failure_result(self):
         result = FetchResult(
             target_key="k",
-            success=False,
+            status=FetchStatus.HTTP_ERROR,
             status_code=404,
             fetched_at=_now(),
             error="not found",
         )
         assert result.success is False
+        assert result.status == FetchStatus.HTTP_ERROR
         assert result.error == "not found"
         assert result.status_code == 404
 
     def test_result_with_etag_and_last_modified(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.NOT_MODIFIED,
             status_code=304,
             fetched_at=_now(),
             etag="new-etag",
@@ -111,11 +114,12 @@ class TestFetchResult:
         )
         assert result.etag == "new-etag"
         assert result.last_modified.startswith("Wed")
+        assert result.is_304 is True
 
     def test_result_with_content_hash(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
             content_hash="sha256:abc",
@@ -125,7 +129,7 @@ class TestFetchResult:
     def test_result_metadata_default_empty(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
         )
@@ -134,7 +138,7 @@ class TestFetchResult:
     def test_result_metadata_custom(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
             metadata={"source": "test"},
@@ -144,7 +148,7 @@ class TestFetchResult:
     def test_result_is_frozen(self):
         result = FetchResult(
             target_key="k",
-            success=True,
+            status=FetchStatus.SUCCESS,
             status_code=200,
             fetched_at=_now(),
         )

@@ -42,16 +42,20 @@ def test_adapters_module_is_pure_contract():
 
 def test_fetch_module_has_no_concrete_adapter_classes():
     source = (SRC_DIR / "fetch.py").read_text(encoding="utf-8")
-    # Fetch.py should only have Protocol/ABC definitions, no concrete classes
+    # Fetch.py should only have Protocol/ABC definitions, no concrete classes.
+    # Enum subclasses are allowed because they are type definitions, not adapters.
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                if isinstance(base, ast.Name) and base.id not in {"Protocol"}:
-                    pytest.fail(
-                        f"fetch.py defines concrete class {node.name} "
-                        f"with base {base.id}"
-                    )
+            # Allow Protocol and Enum subclasses
+            base_names = {
+                base.id for base in node.bases if isinstance(base, ast.Name)
+            }
+            if base_names and not (base_names <= {"Protocol", "Enum", "str"}):
+                pytest.fail(
+                    f"fetch.py defines concrete class {node.name} "
+                    f"with bases {sorted(base_names)}"
+                )
 
 
 # ---------------------------------------------------------------------------

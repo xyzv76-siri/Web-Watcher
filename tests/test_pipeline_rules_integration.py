@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from datetime import datetime
 from web_watcher.scheduled_runner import ScheduledRunner
 from web_watcher.repository import Repository
+from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.models import TargetStatus
 
@@ -51,7 +52,10 @@ def test_pipeline_run_generic_web_flow(tmp_path):
     mock_fetcher = MagicMock(spec=SmartFetcher)
     # AWS 页面响应
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="aws_ec2_rule",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content='<div class="price">$0.096</div>',
         etag='"etag-100"',
     )
@@ -96,7 +100,10 @@ rules:
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_requests",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=release_payload,
         etag='"gh-etag-232"',
     )
@@ -165,7 +172,10 @@ def test_pipeline_event_correlator_called_when_signals_emitted(tmp_path):
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="aws_ec2_rule",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content="<div class='price'>$0.096</div>",
         etag='"etag-100"',
     )

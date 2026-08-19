@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy, FetchDecision, FetchEvaluation
 from web_watcher.fetcher import SmartFetcher, FetchResult
+from web_watcher.fetch import FetchStatus
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -124,7 +125,7 @@ class GitHubTarget:
             eval_res = policy.evaluate_response(self.target, res.status_code, error=res.error, now=now)
             self.target.status = eval_res.new_status
 
-            if res.status_code == 304 or res.is_304_not_modified:
+            if res.status == FetchStatus.NOT_MODIFIED:
                 is_any_304 = True
             elif res.status_code == 200 and res.content:
                 try:
@@ -186,7 +187,7 @@ class GitHubTarget:
                             signals.append(sig)
                 except Exception:
                     pass
-            elif res.status_code == 304 or res.is_304_not_modified:
+            elif res.status == FetchStatus.NOT_MODIFIED:
                 is_any_304 = True
             last_status_code = res.status_code
 

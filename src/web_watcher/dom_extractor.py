@@ -54,6 +54,15 @@ class DOMExtractor:
                         metadata=meta,
                     )
 
+                if len(elements) > 1:
+                    return ExtractionResult(
+                        status=ExtractionStatus.MULTIPLE_MATCH,
+                        raw_value=None,
+                        value=None,
+                        error_message=f"CSS selector '{config.selector}' matched {len(elements)} elements",
+                        metadata=meta,
+                    )
+
                 raw_text = elements[0].get_text()
                 return cls._apply_transforms(raw_text, config, meta)
 

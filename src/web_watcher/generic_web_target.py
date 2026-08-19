@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.fetcher import SmartFetcher, FetchResult
+from web_watcher.fetch import FetchStatus
 from web_watcher.dom_extractor import DOMExtractor
 from web_watcher.rule_models import ExtractorConfig, ExtractionResult
 try:
@@ -104,7 +105,7 @@ class GenericWebTarget:
         self.target.last_fetched_at = now
 
         # 5. 304 short circuit
-        if evaluation.status_code == 304 or fetch_res.is_304_not_modified:
+        if evaluation.status_code == 304 or fetch_res.status == FetchStatus.NOT_MODIFIED:
             if repo and hasattr(repo, "save_target"):
                 repo.save_target(self.target)
             return TargetExecutionResult(

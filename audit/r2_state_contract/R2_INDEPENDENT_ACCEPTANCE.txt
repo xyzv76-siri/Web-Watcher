@@ -1,0 +1,303 @@
+﻿R2 INDEPENDENT ACCEPTANCE
+=========================
+
+结论：BLOCKED
+
+1. Repository identity
+-----------------------
+Repository: web-watcher
+Working directory: /run/csi/mount-root/nas/4079184d856ecc166ed19d4887083405/workspaces/default/web-watcher
+
+2. HEAD
+-------
+d0c4ab06b1e79f2063f21a2203ab112c2ab75a13
+feat: H2 selector failure semantics with ExtractionStatus/ExtractionResult and false-positive guards
+
+3. Original baseline
+--------------------
+984 passed, 0 failed
+
+4. Current test result
+----------------------
+pytest -q: 984 passed, 0 failed
+
+5. Modified files
+-----------------
+src/web_watcher/fetch.py
+src/web_watcher/fetch_service.py
+src/web_watcher/fetcher.py
+src/web_watcher/generic_web_target.py
+src/web_watcher/github_repository_adapter.py
+src/web_watcher/github_target.py
+tests/test_fetch_contract.py
+tests/test_fetch_service.py
+tests/test_generic_web_target.py
+tests/test_github_repository_adapter.py
+tests/test_github_target.py
+tests/test_no_network.py
+tests/test_phase7_persistence.py
+tests/test_pipeline_rules_integration.py
+
+6. FetchResult authority
+-----------------------
+定义位置：仅 src/web_watcher/fetch.py:40
+生产代码引用：
+ - fetch.py: 定义
+ - fetcher.py: from .fetch import FetchResult, FetchStatus
+ - fetch_service.py: from .fetch import FetchRequest, FetchResult, FetchStatus
+ - generic_web_target.py: from web_watcher.fetcher import SmartFetcher, FetchResult
+ - github_repository_adapter.py: from .fetch import FetchRequest, FetchResult, FetchStatus, SourceAdapter
+ - github_target.py: from web_watcher.fetcher import SmartFetcher, FetchResult
+
+结论：G1 PASS - 生产代码中只有一个权威 FetchResult 定义
+
+7. FetchStatus authority
+------------------------
+定义位置：仅 src/web_watcher/fetch.py:15
+生产代码引用：
+ - fetch.py: 定义
+ - fetch_service.py: from .fetch import FetchRequest, FetchResult, FetchStatus
+ - fetcher.py: from .fetch import FetchResult, FetchStatus
+ - generic_web_target.py: from web_watcher.fetch import FetchStatus
+ - github_repository_adapter.py: from .fetch import FetchRequest, FetchResult, FetchStatus, SourceAdapter
+ - github_target.py: from web_watcher.fetch import FetchStatus
+
+结论：G2 PASS - 只有一个权威 FetchStatus 定义
+
+8. Fetch state propagation
+--------------------------
+SUCCESS:
+ - 产生：SmartFetcher.fetch() 对 200-299 响应
+ - 消费：FetchService._apply_result() 持久化并创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 执行提取和变化检测
+
+NOT_MODIFIED:
+ - 产生：SmartFetcher.fetch() 对 304 响应
+ - 消费：FetchService._apply_result() 保留 prior state，不创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 设置 is_304=True，不提取
+
+HTTP_ERROR:
+ - 产生：SmartFetcher.fetch() 对 4xx/5xx (非 429)
+ - 消费：FetchService._apply_result() 直接返回，不创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 通过 evaluation.should_emit_signal=False 阻止 Signal
+
+RATE_LIMITED:
+ - 产生：SmartFetcher.fetch() 对 429 响应
+ - 消费：FetchService._apply_result() 直接返回，不创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 通过 evaluation.should_emit_signal=False 阻止 Signal
+
+TIMEOUT:
+ - 产生：SmartFetcher.fetch() 对 Timeout 异常
+ - 消费：FetchService._apply_result() 直接返回，不创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 通过 evaluation.should_emit_signal=False 阻止 Signal
+
+NETWORK_ERROR:
+ - 产生：SmartFetcher.fetch() 对 ConnectionError/RequestException
+ - 消费：FetchService._apply_result() 直接返回，不创建 Signal
+ - 传播：GenericWebTarget/GitHubTarget 通过 evaluation.should_emit_signal=False 阻止 Signal
+
+INVALID_RESPONSE:
+ - 产生：未在当前代码路径显式触发
+ - 消费：N/A
+ - 传播：N/A
+
+结论：G3 PASS - 所有状态都有明确的产生者和消费者，传播路径正确
+
+9. Failure safety
+------------------
+检查项：
+ - HTTP_ERROR -> NO SIGNAL: PASS (fetch_service.py 直接返回)
+ - RATE_LIMITED -> NO SIGNAL: PASS (fetch_service.py 直接返回)
+ - TIMEOUT -> NO SIGNAL: PASS (fetch_service.py 直接返回)
+ - NETWORK_ERROR -> NO SIGNAL: PASS (fetch_service.py 直接返回)
+ - INVALID_RESPONSE -> NO SIGNAL: PASS (未定义触发路径)
+ - content is None + status_code != 200 -> NO SIGNAL: PASS (fetch_service.py 检查)
+ - exception -> NO SIGNAL: PASS (fetcher.py 捕获并映射为错误状态)
+
+是否存在 failure -> evaluation -> signal 的错误路径：否
+
+结论：G4 PASS - failure 状态不会产生 Signal
+
+10. 304 semantics
+-----------------
+检查路径：
+ - SmartFetcher.fetch(): 304 -> FetchStatus.NOT_MODIFIED
+ - FetchService._apply_result(): NOT_MODIFIED -> return, 保留 prior state
+ - GenericWebTarget: NOT_MODIFIED -> is_304=True, 不提取, 不产生 Signal
+ - GitHubTarget: NOT_MODIFIED -> is_any_304=True, 不产生 Signal
+ - GitHubRepositoryAdapter: 304 -> FetchStatus.NOT_MODIFIED
+
+304 是否产生虚假 Signal：否
+304 是否覆盖已有有效状态：否
+304 是否被当作普通新内容处理：否
+
+结论：G5 PASS - 304 保持 NOT_MODIFIED 语义
+
+11. ExtractionStatus semantics
+------------------------------
+定义位置：src/web_watcher/rule_models.py:55
+状态定义：
+ - FOUND: 明确找到匹配
+ - SELECTOR_NOT_FOUND: 选择器未匹配到任何元素
+ - EMPTY_AFTER_TRANSFORM: 匹配后转换结果为空
+ - MULTIPLE_MATCH: 多个匹配元素
+ - TRANSFORM_ERROR: 转换过程中发生错误
+
+结论：G6 PARTIAL - ExtractionStatus 定义完整，但 MULTIPLE_MATCH 未实现
+
+12. MULTIPLE_MATCH verification
+--------------------------------
+检查 src/web_watcher/dom_extractor.py:
+```python
+elements = soup.select(config.selector)
+meta["match_count"] = len(elements)
+
+if not elements:
+    return ExtractionResult(
+        status=ExtractionStatus.SELECTOR_NOT_FOUND,
+        ...
+    )
+
+raw_text = elements[0].get_text()
+return cls._apply_transforms(raw_text, config, meta)
+```
+
+发现：
+ - 当 elements 数量 > 1 时，代码静默取 elements[0]
+ - 永不返回 ExtractionStatus.MULTIPLE_MATCH
+ - 无任何测试覆盖多个匹配元素的场景
+
+R2 contract 要求：
+ "禁止静默吞掉 multiple matches"
+ "如果 selector 得到 >1 matches -> MULTIPLE_MATCH"
+ "不能：取第一个"
+
+当前代码违反上述要求。
+
+结论：G7 FAIL - MULTIPLE_MATCH 未实现，存在静默截断
+
+13. Signal safety
+-----------------
+检查路径：
+ - GenericWebTarget: 非 200 / NOT_MODIFIED -> should_emit_signal=False -> NO SIGNAL
+ - GitHubTarget: 仅 200 + content -> 可能 Signal; 其他状态 -> NO SIGNAL
+ - fetch_service.py: 非 SUCCESS/NOT_MODIFIED -> NO SIGNAL
+ - 提取失败 (SELECTOR_NOT_FOUND, TRANSFORM_ERROR) -> has_failures=True, 但 content change 仍可能触发 Signal
+
+潜在问题：
+GenericWebTarget 中，如果 content changed 但所有 extractors 都失败：
+```python
+if self.extractors and all(not extracted_results[e.name].is_found for e in self.extractors):
+    should_emit = False
+```
+这已经处理了该情况，会抑制 Signal。
+
+结论：G8 PASS - infrastructure/network/fetch/extraction failure 不会错误产生 Signal
+
+14. Test integrity review
+--------------------------
+检查 git diff -- tests:
+ - 所有修改均为适应新 FetchResult API（增加 target_key, status, fetched_at）
+ - 未删除/跳过/修改测试掩盖问题
+ - 未降低 assertion 标准
+ - 304 测试从 assert result.success is True 修正为 assert result.success is False，修正了原有错误语义
+ - 未发现 test weakening
+
+特别检查：
+ - test_no_network.py: 允许 Enum 子类，合理
+ - test_fetch_contract.py: 更新 API 调用，保留行为验证
+ - test_fetch_service.py: 更新 API 调用，保留行为验证
+ - test_github_repository_adapter.py: 修复 304 语义冲突
+ - test_github_target.py: 修复构造函数参数不兼容
+ - test_phase7_persistence.py: 修复构造函数参数不兼容
+ - test_pipeline_rules_integration.py: 修复构造函数参数不兼容
+
+结论：G9 PASS - 测试修改未降低原有行为保护
+
+15. compileall
+--------------
+python -m compileall -q src tests: PASS
+
+结论：G10 PASS
+
+16. git diff --check
+--------------------
+git diff --check: PASS
+
+结论：G11 PASS
+
+17. Full test
+-------------
+pytest -q: 984 passed, 0 failed
+
+结论：G12 PASS
+
+18. Scope integrity
+-------------------
+检查所有修改文件：
+ - src/web_watcher/fetch.py: Fetch Contract
+ - src/web_watcher/fetch_service.py: Fetch Contract
+ - src/web_watcher/fetcher.py: Fetch Contract
+ - src/web_watcher/generic_web_target.py: Fetch Contract
+ - src/web_watcher/github_repository_adapter.py: Fetch Contract
+ - src/web_watcher/github_target.py: Fetch Contract
+ - tests/*: Fetch Contract 测试适配
+
+未发现 H3/H5 等其他阶段施工：
+ - 未实现 host-level rate limiter
+ - 未实现 migration framework
+ - 未实现 foreign key migration
+ - 未实现 restart recovery
+ - 未实现 lease architecture
+ - 未实现 scheduler integration
+
+结论：G13 PASS - 未扩大 scope
+
+19. Remaining risks
+--------------------
+风险 1: MULTIPLE_MATCH 未实现
+ - 影响：CSS/XPath 选择器匹配多个元素时，静默取第一个，可能导致错误 Signal
+ - 严重程度：高
+ - 修复建议：修改 dom_extractor.py，当 elements 数量 > 1 时返回 MULTIPLE_MATCH
+ - 测试建议：添加测试覆盖多个匹配元素的场景
+
+风险 2: INVALID_RESPONSE 未在生产代码中触发
+ - 影响：当前无路径产生此状态，enum 定义但未使用
+ - 严重程度：低
+ - 说明：不影响当前功能，但未来需确保 malformed response 能正确映射到此状态
+
+20. Acceptance gates summary
+-----------------------------
+G1 FetchResult single authority: PASS
+G2 FetchStatus single authority: PASS
+G3 Fetch state propagation: PASS
+G4 Failure safety: PASS
+G5 304 semantics: PASS
+G6 Extraction contract: PARTIAL (MULTIPLE_MATCH 未实现)
+G7 MULTIPLE_MATCH: FAIL
+G8 Signal safety: PASS
+G9 Test integrity: PASS
+G10 compileall: PASS
+G11 git diff --check: PASS
+G12 pytest: PASS
+G13 scope integrity: PASS
+
+21. Final decision
+------------------
+R2 = BLOCKED
+
+阻塞原因：
+R2 contract 要求 Extraction Contract 正确处理 MULTIPLE_MATCH，
+但 src/web_watcher/dom_extractor.py 对 CSS/XPath 选择器
+静默取第一个匹配元素 (elements[0])，永不返回 MULTIPLE_MATCH 状态，
+且无任何测试覆盖该场景。
+
+该问题无法从当前代码和测试中证明 MULTIPLE_MATCH
+acceptance gate 已满足。
+
+22. Next steps
+---------------
+- 停止施工
+- 不进入 H3/H5
+- 不扩大施工范围
+- 等待用户决策：修正 dom_extractor.py 的 MULTIPLE_MATCH 处理，或调整 R2 contract 范围

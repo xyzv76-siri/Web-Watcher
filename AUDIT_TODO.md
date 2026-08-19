@@ -1,0 +1,19 @@
+# AUDIT — WEB-WATCHER NIGHT ARCHITECTURE FORENSIC AUDIT
+- [ ] Phase 01: VPS / Git / Runtime Ground Truth
+- [ ] Phase 02: Project / Domain Map
+- [ ] Phase 03: Domain Type Safety
+- [ ] Phase 04: Repository / SQLite
+- [ ] Phase 05: H1 Claim / Lease / Fencing
+- [ ] Phase 06: Fetch Policy / Smart Fetcher
+- [ ] Phase 07: Host Rate Limit
+- [ ] Phase 08: Target / Extraction
+- [ ] Phase 09: Selector Failure / False Positive
+- [ ] Phase 10: Signal / Event
+- [ ] Phase 11: Investigation / Evidence
+- [ ] Phase 12: Notification / Alert Silencer
+- [ ] Phase 13: Scheduled Runner / Pipeline Runner
+- [ ] Phase 14: GitHub API Adapter
+- [ ] Phase 15: Test Quality Audit
+- [ ] Phase 16: Production State
+- [ ] Phase 17: Architecture Red Line Check
+- [ ] Phase 18: Gemini Change Forensics

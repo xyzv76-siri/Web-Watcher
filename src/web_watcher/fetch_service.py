@@ -45,7 +45,7 @@ from typing import Optional
 from .signal_types import SignalType
 from .adapters import AdapterRegistry
 from .content_hash import sha256_of
-from .fetch import FetchRequest, FetchResult
+from .fetch import FetchRequest, FetchResult, FetchStatus
 from .fingerprint import fingerprint_for_signal
 from .models import Entity, FetchState, Signal
 from .repository import Repository
@@ -133,17 +133,18 @@ class FetchService:
     ) -> None:
         """Persist a FetchResult according to the Phase 7 rules."""
 
-        if not result.success:
+        # ---- Non-success / failure states ------------------------------------
+        if result.status not in (FetchStatus.SUCCESS, FetchStatus.NOT_MODIFIED):
             # Failed fetch → do NOT overwrite previous FetchState,
             # do NOT create a Signal, do NOT destroy previous state.
             return
 
         # ---- 304 Not Modified ------------------------------------------------
-        if result.status_code == 304:
+        if result.status == FetchStatus.NOT_MODIFIED:
             # Preserve everything: etag, last_modified, content_hash, fetched_at.
             return
 
-        # ---- 200 with content ------------------------------------------------
+        # ---- SUCCESS with content --------------------------------------------
         if result.content is None or result.status_code != 200:
             # No content (204 / empty) → nothing to persist as state or signal.
             return

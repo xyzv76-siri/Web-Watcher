@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from web_watcher.adapters import AdapterRegistry
-from web_watcher.fetch import FetchRequest, FetchResult
+from web_watcher.fetch import FetchRequest, FetchResult, FetchStatus
 from web_watcher.fetch_service import FetchService
 from web_watcher.models import FetchState
 from web_watcher.repository import Repository
@@ -31,7 +31,7 @@ def _mk_target(**overrides):
 def _mk_result(**overrides):
     defaults = {
         "target_key": "github:openai/gpt-4o",
-        "success": True,
+        "status": FetchStatus.SUCCESS,
         "status_code": 200,
         "fetched_at": _now(),
         "content": '{"name":"gpt-4o"}',
@@ -208,7 +208,7 @@ class Test304NotModified:
                 calls.append(request)
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=True,
+                    status=FetchStatus.NOT_MODIFIED,
                     status_code=304,
                     fetched_at=_now(),
                     content=None,
@@ -221,7 +221,8 @@ class Test304NotModified:
         service = FetchService(repository=repo, adapter_registry=registry)
         result = service.fetch_one(_mk_target())
 
-        assert result.success is True
+        assert result.status == FetchStatus.NOT_MODIFIED
+        assert result.success is False
         assert result.status_code == 304
 
         # FetchState should be UNCHANGED
@@ -251,7 +252,7 @@ class Test304NotModified:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=True,
+                    status=FetchStatus.NOT_MODIFIED,
                     status_code=304,
                     fetched_at=_now(),
                     content=None,
@@ -263,7 +264,8 @@ class Test304NotModified:
         service = FetchService(repository=repo, adapter_registry=registry)
         result = service.fetch_one(_mk_target())
 
-        assert result.success is True
+        assert result.status == FetchStatus.NOT_MODIFIED
+        assert result.success is False
         assert result.status_code == 304
         repo.close()
 
@@ -297,7 +299,7 @@ class TestFailureHandling:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=False,
+                    status=FetchStatus.HTTP_ERROR,
                     status_code=404,
                     fetched_at=_now(),
                     error="Not Found",
@@ -330,7 +332,7 @@ class TestFailureHandling:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=False,
+                    status=FetchStatus.HTTP_ERROR,
                     status_code=500,
                     fetched_at=_now(),
                     error="Server Error",
@@ -368,7 +370,7 @@ class TestNoContent:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=True,
+                    status=FetchStatus.SUCCESS,
                     status_code=204,
                     fetched_at=_now(),
                     content=None,
@@ -415,7 +417,7 @@ class TestDeterministicRepeatable:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=True,
+                    status=FetchStatus.SUCCESS,
                     status_code=200,
                     fetched_at=_now(),
                     content='{"name":"a"}',
@@ -429,7 +431,7 @@ class TestDeterministicRepeatable:
             def fetch(self, request):
                 return FetchResult(
                     target_key="github:openai/gpt-4o",
-                    success=True,
+                    status=FetchStatus.SUCCESS,
                     status_code=200,
                     fetched_at=_now(),
                     content='{"name":"b"}',

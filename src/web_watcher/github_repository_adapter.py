@@ -13,7 +13,7 @@ from typing import Optional, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .fetch import FetchRequest, FetchResult, SourceAdapter
+from .fetch import FetchRequest, FetchResult, FetchStatus, SourceAdapter
 from .snapshots import GitHubRepositorySnapshot
 from .targets import WatchTarget
 
@@ -83,7 +83,7 @@ class GitHubRepositoryAdapter:
                 headers = response.headers
                 return FetchResult(
                     target_key=target.key,
-                    success=True,
+                    status=FetchStatus.SUCCESS,
                     status_code=response.status,
                     fetched_at=fetched_at,
                     content=json.dumps(snapshot.__dict__, sort_keys=True),
@@ -100,7 +100,7 @@ class GitHubRepositoryAdapter:
             if exc.code == 304:
                 return FetchResult(
                     target_key=target.key,
-                    success=True,
+                    status=FetchStatus.NOT_MODIFIED,
                     status_code=304,
                     fetched_at=fetched_at,
                     content=None,
@@ -115,7 +115,7 @@ class GitHubRepositoryAdapter:
 
             return FetchResult(
                 target_key=target.key,
-                success=False,
+                status=FetchStatus.HTTP_ERROR,
                 status_code=exc.code,
                 fetched_at=fetched_at,
                 error=f"HTTP {exc.code}: {exc.reason}",
@@ -128,7 +128,7 @@ class GitHubRepositoryAdapter:
         except (URLError, TimeoutError, OSError) as exc:
             return FetchResult(
                 target_key=target.key,
-                success=False,
+                status=FetchStatus.NETWORK_ERROR,
                 status_code=None,
                 fetched_at=fetched_at,
                 error=f"network error: {exc}",

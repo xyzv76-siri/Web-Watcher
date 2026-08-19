@@ -2,6 +2,7 @@ import hashlib
 from unittest.mock import MagicMock
 from datetime import datetime, timedelta
 from web_watcher.models import Target, TargetStatus
+from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.rule_models import ExtractorConfig
@@ -57,8 +58,10 @@ def test_generic_web_target_304_not_modified_short_circuit():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_304",
+        status=FetchStatus.NOT_MODIFIED,
         status_code=304,
-        is_304_not_modified=True,
+        fetched_at=now,
         etag='"etag-123"',
     )
 
@@ -77,7 +80,10 @@ def test_generic_web_target_initial_fetch_emits_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_init",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -104,7 +110,10 @@ def test_generic_web_target_unchanged_content_no_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_unchanged",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -129,7 +138,10 @@ def test_generic_web_target_content_changed_emits_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_changed",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V2,
         etag='"etag-v2"',
     )
@@ -150,7 +162,10 @@ def test_generic_web_target_non_200_status_no_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_500",
+        status=FetchStatus.HTTP_ERROR,
         status_code=500,
+        fetched_at=now,
         content="Internal Server Error",
         error=None,
     )
@@ -173,7 +188,10 @@ def test_generic_web_target_custom_headers_passed_to_fetcher():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_headers",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -193,7 +211,10 @@ def test_generic_web_target_repo_saves_target_and_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_repo",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
