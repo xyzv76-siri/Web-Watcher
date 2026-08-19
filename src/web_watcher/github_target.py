@@ -33,6 +33,11 @@ class GitHubTargetExecutionResult:
     is_304: bool = False
     rate_limit_remaining: Optional[int] = None
     reason: str = ""
+    # observation-only durable-state fields for scheduler commit
+    updated_metadata: Optional[Dict[str, Any]] = None
+    consecutive_failures: int = 0
+    next_allowed_at: Optional[datetime] = None
+    last_fetched_at: Optional[datetime] = None
 
 
 class GitHubTarget:
@@ -115,6 +120,9 @@ class GitHubTarget:
         signals: List[Any] = []
         is_any_304 = False
         last_status_code = 200
+        observed_status = self.target.status
+        observed_consecutive_failures = 0
+        observed_next_allowed_at = None
 
         # 2. 检查 Releases
         if "releases" in self.watch_types:
@@ -123,7 +131,9 @@ class GitHubTarget:
             res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
 
             eval_res = policy.evaluate_response(self.target, res.status_code, error=res.error, now=now)
-            self.target.status = eval_res.new_status
+            observed_status = eval_res.new_status
+            observed_consecutive_failures = eval_res.consecutive_failures
+            observed_next_allowed_at = eval_res.next_allowed_at
 
             if res.status == FetchStatus.NOT_MODIFIED:
                 is_any_304 = True
@@ -191,26 +201,17 @@ class GitHubTarget:
                 is_any_304 = True
             last_status_code = res.status_code
 
-        # 4. 同步更新状态与元数据
-        self.target.metadata = meta
-        self.target.last_fetched_at = now
-        if repo and hasattr(repo, "save_target"):
-            repo.save_target(self.target)
-
-        # 5. 持久化 signals
-        if repo and hasattr(repo, "save_signal"):
-            for s in signals:
-                try:
-                    repo.save_signal(s)
-                except Exception:
-                    pass
-
+        # 4. Return observation-only result; scheduler/repo owns durable persistence.
         return GitHubTargetExecutionResult(
             target_id=self.target.id,
             allowed=True,
             status_code=last_status_code,
-            new_status=self.target.status,
+            new_status=observed_status,
             signals_emitted=signals,
             is_304=is_any_304 and len(signals) == 0,
             reason=f"Emitted {len(signals)} GitHub signals" if signals else "No new events",
+            updated_metadata=meta,
+            consecutive_failures=observed_consecutive_failures,
+            next_allowed_at=observed_next_allowed_at,
+            last_fetched_at=now,
         )

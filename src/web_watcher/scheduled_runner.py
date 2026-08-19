@@ -1,5 +1,6 @@
 import os
 import logging
+import socket
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Union
@@ -41,6 +42,7 @@ class ScheduledRunner:
         rules_path: Optional[Union[str, Path]] = None,
         fetcher: Optional[SmartFetcher] = None,
         policy: Optional[FetchPolicy] = None,
+        worker_id: Optional[str] = None,
     ):
         self.config = config or get_config()
         self.repo = repo
@@ -48,6 +50,7 @@ class ScheduledRunner:
         self.fetcher = fetcher or SmartFetcher(default_timeout=getattr(self.config, "default_timeout", 10.0))
         self.policy = policy or FetchPolicy()
         self._rule_cache: Dict[str, WatcherRule] = {}
+        self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
 
     def sync_rules(self, rules_path: Optional[Union[str, Path]] = None) -> List[Target]:
         path = rules_path or self.rules_path
@@ -123,6 +126,40 @@ class ScheduledRunner:
                 timeout=timeout,
             )
 
+    def _commit_or_release(
+        self,
+        target_id: str,
+        claim_token: str,
+        result,
+        now: datetime,
+    ) -> None:
+        if not self.repo or not hasattr(self.repo, "commit_target_execution"):
+            return
+
+        new_status = getattr(result, "new_status", TargetStatus.NORMAL)
+        etag = getattr(result, "updated_etag", None)
+        last_modified = getattr(result, "updated_last_modified", None)
+        content_hash = getattr(result, "updated_content_hash", None)
+        metadata = getattr(result, "updated_metadata", None)
+        consecutive_failures = getattr(result, "consecutive_failures", 0)
+        next_allowed_at = getattr(result, "next_allowed_at", None)
+        last_fetched_at = getattr(result, "last_fetched_at", now)
+
+        committed = self.repo.commit_target_execution(
+            target_id=target_id,
+            claim_token=claim_token,
+            new_status=new_status,
+            etag=etag,
+            last_modified=last_modified,
+            content_hash=content_hash,
+            consecutive_failures=consecutive_failures,
+            next_allowed_at=next_allowed_at,
+            metadata=metadata,
+            now=now,
+        )
+        if not committed:
+            logger.warning(f"Fenced commit failed for target '{target_id}'; lease may have been lost.")
+
     def run_once(
         self,
         auto_deliver: bool = False,
@@ -134,16 +171,21 @@ class ScheduledRunner:
         if self.rules_path:
             self.sync_rules(self.rules_path)
 
-        # 2. 检出当前可调度 Target 列表
-        targets: List[Target] = []
-        if self.repo and hasattr(self.repo, "list_schedulable_targets"):
-            targets = self.repo.list_schedulable_targets(now=now)
+        # 2. Claim：生产路径必须通过 lease/fencing
+        claimed: List[Any] = []
+        if self.repo and hasattr(self.repo, "claim_targets"):
+            claimed = self.repo.claim_targets(
+                worker_id=self.worker_id,
+                limit=100,
+                lease_duration_sec=300.0,
+                now=now,
+            )
         elif self._rule_cache:
             for r_id, r in self._rule_cache.items():
-                targets.append(Target(id=r.id, url=r.target.url, interval=r.target.interval))
+                claimed.append(Target(id=r.id, url=r.target.url, interval=r.target.interval))
 
         summary = {
-            "targets_evaluated": len(targets),
+            "targets_evaluated": len(claimed),
             "signals_emitted": 0,
             "is_304_count": 0,
             "skipped_count": 0,
@@ -152,10 +194,11 @@ class ScheduledRunner:
 
         all_signals = []
 
-        # 3. 逐个执行适配器
-        for target in targets:
+        # 3. 逐个执行适配器并做 fenced persistence
+        for target in claimed:
             rule = self._rule_cache.get(target.id)
             adapter = self._resolve_adapter(target, rule)
+            claim_token = getattr(target, "claim_token", None)
 
             try:
                 result = adapter.execute(
@@ -166,6 +209,8 @@ class ScheduledRunner:
                 )
                 if not result.allowed:
                     summary["skipped_count"] += 1
+                    if claim_token and hasattr(self.repo, "release_target_lease"):
+                        self.repo.release_target_lease(target.id, claim_token, now=now)
                     continue
 
                 if getattr(result, "is_304", False):
@@ -175,9 +220,19 @@ class ScheduledRunner:
                     summary["signals_emitted"] += len(result.signals_emitted)
                     all_signals.extend(result.signals_emitted)
 
+                if claim_token and hasattr(self.repo, "commit_target_execution"):
+                    self._commit_or_release(target.id, claim_token, result, now)
+                elif claim_token and hasattr(self.repo, "release_target_lease"):
+                    self.repo.release_target_lease(target.id, claim_token, now=now)
+
             except Exception as e:
                 logger.error(f"Error evaluating target '{target.id}': {e}", exc_info=True)
                 summary["errors"].append({"target_id": target.id, "error": str(e)})
+                if claim_token and hasattr(self.repo, "release_target_lease"):
+                    try:
+                        self.repo.release_target_lease(target.id, claim_token, now=now)
+                    except Exception:
+                        pass
 
         # 4. 信号聚合与事件关联
         if self.repo and EventCorrelator and all_signals:

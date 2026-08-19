@@ -27,6 +27,14 @@ class TargetExecutionResult:
     is_304: bool = False
     has_extraction_failures: bool = False
     reason: str = ""
+    # observation-only durable-state fields for scheduler commit
+    updated_etag: Optional[str] = None
+    updated_last_modified: Optional[str] = None
+    updated_content_hash: Optional[str] = None
+    updated_metadata: Optional[Dict[str, Any]] = None
+    consecutive_failures: int = 0
+    next_allowed_at: Optional[datetime] = None
+    last_fetched_at: Optional[datetime] = None
 
 
 class GenericWebTarget:
@@ -36,7 +44,7 @@ class GenericWebTarget:
         self,
         target: Target,
         extractors: Optional[List[ExtractorConfig]] = None,
-        custom_headers: Optional[Dict[str, str]] = None,
+        custom_headers: Optional[Dict[str, Any]] = None,
         timeout: float = 10.0,
     ):
         self.target = target
@@ -96,43 +104,49 @@ class GenericWebTarget:
             now=now,
         )
 
-        # 4. Update target state machine
-        self.target.status = evaluation.new_status
-        self.target.etag = evaluation.updated_etag
-        self.target.last_modified = evaluation.updated_last_modified
-        self.target.consecutive_failures = evaluation.consecutive_failures
-        self.target.next_allowed_at = evaluation.next_allowed_at
-        self.target.last_fetched_at = now
+        # 4. Collect observation-only state updates; do NOT mutate self.target durable state here.
+        observed_status = evaluation.new_status
+        updated_etag = evaluation.updated_etag
+        updated_last_modified = evaluation.updated_last_modified
+        observed_consecutive_failures = evaluation.consecutive_failures
+        observed_next_allowed_at = evaluation.next_allowed_at
+        observed_last_fetched_at = now
 
         # 5. 304 short circuit
         if evaluation.status_code == 304 or fetch_res.status == FetchStatus.NOT_MODIFIED:
-            if repo and hasattr(repo, "save_target"):
-                repo.save_target(self.target)
             return TargetExecutionResult(
                 target_id=self.target.id,
                 allowed=True,
                 status_code=304,
-                new_status=self.target.status,
+                new_status=observed_status,
                 signals_emitted=[],
                 extracted_results={},
                 extracted_values={},
                 is_304=True,
                 reason=evaluation.reason,
+                updated_etag=updated_etag,
+                updated_last_modified=updated_last_modified,
+                consecutive_failures=observed_consecutive_failures,
+                next_allowed_at=observed_next_allowed_at,
+                last_fetched_at=observed_last_fetched_at,
             )
 
-        # 6. Non-success status: persist and return
+        # 6. Non-success status: return observation without persistence
         if not evaluation.should_emit_signal:
-            if repo and hasattr(repo, "save_target"):
-                repo.save_target(self.target)
             return TargetExecutionResult(
                 target_id=self.target.id,
                 allowed=True,
                 status_code=evaluation.status_code,
-                new_status=self.target.status,
+                new_status=observed_status,
                 signals_emitted=[],
                 extracted_results={},
                 extracted_values={},
                 reason=evaluation.reason,
+                updated_etag=updated_etag,
+                updated_last_modified=updated_last_modified,
+                consecutive_failures=observed_consecutive_failures,
+                next_allowed_at=observed_next_allowed_at,
+                last_fetched_at=observed_last_fetched_at,
             )
 
         # 7. Successful fetch: extract fields
@@ -170,10 +184,11 @@ class GenericWebTarget:
             emit_reason = "Content identical, no signal emitted"
 
         signals: List[Any] = []
+        updated_metadata = dict(self.target.metadata or {})
         if should_emit:
-            self.target.content_hash = new_hash
-            self.target.metadata["initialized"] = True
-            self.target.metadata["last_extracted"] = {k: v.value for k, v in extracted_results.items() if v.is_found}
+            updated_content_hash = new_hash
+            updated_metadata["initialized"] = True
+            updated_metadata["last_extracted"] = {k: v.value for k, v in extracted_results.items() if v.is_found}
 
             payload = {
                 "target_id": self.target.id,
@@ -209,25 +224,25 @@ class GenericWebTarget:
                 sig_obj = payload
 
             signals.append(sig_obj)
-            if repo and hasattr(repo, "save_signal") and sig_obj is not None:
-                try:
-                    repo.save_signal(sig_obj)
-                except Exception:
-                    pass
-
-        # 9. Persist latest target state
-        if repo and hasattr(repo, "save_target"):
-            repo.save_target(self.target)
+        else:
+            updated_content_hash = prev_hash
 
         return TargetExecutionResult(
             target_id=self.target.id,
             allowed=True,
             status_code=fetch_res.status_code,
-            new_status=self.target.status,
+            new_status=observed_status,
             signals_emitted=signals,
             extracted_results=extracted_results,
             extracted_values=extracted_values,
             is_304=False,
             has_extraction_failures=has_failures,
             reason=emit_reason,
+            updated_etag=updated_etag,
+            updated_last_modified=updated_last_modified,
+            updated_content_hash=updated_content_hash,
+            updated_metadata=updated_metadata,
+            consecutive_failures=observed_consecutive_failures,
+            next_allowed_at=observed_next_allowed_at,
+            last_fetched_at=observed_last_fetched_at,
         )
