@@ -63,8 +63,9 @@ def test_pipeline_run_generic_web_flow(tmp_path):
     runner = ScheduledRunner(repo=repo, rules_path=rules_file, fetcher=mock_fetcher)
     summary = runner.run_once()
 
+    # First observation establishes baseline; no signal is emitted.
     assert summary["targets_evaluated"] == 2
-    assert summary["signals_emitted"] >= 1
+    assert summary["signals_emitted"] == 0
     target = repo.get_target("aws_ec2_rule")
     assert target.etag == '"etag-100"'
 
@@ -189,6 +190,6 @@ def test_pipeline_event_correlator_called_when_signals_emitted(tmp_path):
         runner = ScheduledRunner(repo=repo, rules_path=rules_file, fetcher=mock_fetcher)
         summary = runner.run_once()
         if summary["signals_emitted"]:
-            mock_correlator.correlate_signals.assert_called_once()
+            mock_correlator.process_signal.assert_called()
     finally:
         scheduled_module.EventCorrelator = original_correlator

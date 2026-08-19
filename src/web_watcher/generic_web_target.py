@@ -9,6 +9,12 @@ from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch import FetchStatus
 from web_watcher.dom_extractor import DOMExtractor
 from web_watcher.rule_models import ExtractorConfig, ExtractionResult
+from web_watcher.execution_semantics import ExecutionOutcome, transition_for
+from web_watcher.targets import validate_selector, _validate_url
+from web_watcher.normalizer import normalize_extracted_text
+from web_watcher.web_fingerprint import observation_fingerprint, selector_config_fingerprint
+from web_watcher.diff import compute_diff, DiffResult
+from web_watcher.observation import ObservationResult, ObservationStatus
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -35,10 +41,13 @@ class TargetExecutionResult:
     consecutive_failures: int = 0
     next_allowed_at: Optional[datetime] = None
     last_fetched_at: Optional[datetime] = None
+    outcome: Any = None
+    transition: Any = None
+    observation: Optional[ObservationResult] = None
 
 
 class GenericWebTarget:
-    """General-purpose web target adapter with polite fetch, cache handling, extraction, and false-positive guards."""
+    """General-purpose web target adapter with polite fetch, cache handling, extraction, normalization, fingerprinting, diffing, and false-positive guards."""
 
     def __init__(
         self,
@@ -47,6 +56,9 @@ class GenericWebTarget:
         custom_headers: Optional[Dict[str, Any]] = None,
         timeout: float = 10.0,
     ):
+        _validate_url(target.url)
+        for ext in (extractors or []):
+            validate_selector(ext.selector_type, ext.selector)
         self.target = target
         self.extractors = extractors or []
         self.custom_headers = custom_headers or {}
@@ -75,6 +87,12 @@ class GenericWebTarget:
                 extracted_results={},
                 extracted_values={},
                 reason=decision.reason or "Execution skipped by policy",
+                outcome=ExecutionOutcome.POLICY_BLOCKED,
+                transition=transition_for(
+                    ExecutionOutcome.POLICY_BLOCKED,
+                    target=self.target,
+                    now=now,
+                ),
             )
 
         # 2. Fetch
@@ -129,10 +147,34 @@ class GenericWebTarget:
                 consecutive_failures=observed_consecutive_failures,
                 next_allowed_at=observed_next_allowed_at,
                 last_fetched_at=observed_last_fetched_at,
+                outcome=ExecutionOutcome.NOT_MODIFIED,
+                transition=transition_for(
+                    ExecutionOutcome.NOT_MODIFIED,
+                    target=self.target,
+                    now=now,
+                    etag=updated_etag,
+                    last_modified=updated_last_modified,
+                ),
+                observation=ObservationResult(
+                    target_id=self.target.id,
+                    status=ObservationStatus.UNCHANGED,
+                    status_code=304,
+                    reason="HTTP 304 Not Modified; short-circuited without extraction or fingerprinting",
+                    evidence={"http_status": 304},
+                    observed_at=now,
+                ),
             )
 
-        # 6. Non-success status: return observation without persistence
+        # 6. Non-success status: return observation without extraction/fingerprint/diff
         if not evaluation.should_emit_signal:
+            if evaluation.new_status == TargetStatus.COOLDOWN:
+                outcome = ExecutionOutcome.POLICY_COOLDOWN
+            elif fetch_res.status == FetchStatus.TIMEOUT or (fetch_res.status_code is not None and fetch_res.status_code == 0):
+                outcome = ExecutionOutcome.TIMEOUT
+            elif fetch_res.error is not None or (fetch_res.status_code is not None and fetch_res.status_code >= 400 and fetch_res.status_code != 404):
+                outcome = ExecutionOutcome.FETCH_FAILED
+            else:
+                outcome = ExecutionOutcome.SUCCESS_UNCHANGED
             return TargetExecutionResult(
                 target_id=self.target.id,
                 allowed=True,
@@ -147,56 +189,165 @@ class GenericWebTarget:
                 consecutive_failures=observed_consecutive_failures,
                 next_allowed_at=observed_next_allowed_at,
                 last_fetched_at=observed_last_fetched_at,
+                outcome=outcome,
+                transition=transition_for(
+                    outcome,
+                    target=self.target,
+                    now=now,
+                    etag=updated_etag,
+                    last_modified=updated_last_modified,
+                    consecutive_failures=observed_consecutive_failures,
+                    next_allowed_at=observed_next_allowed_at,
+                ),
+                observation=ObservationResult(
+                    target_id=self.target.id,
+                    status=ObservationStatus.HTTP_FAILURE if outcome == ExecutionOutcome.FETCH_FAILED else ObservationStatus.UNCHANGED,
+                    status_code=evaluation.status_code,
+                    reason=evaluation.reason,
+                    evidence={"outcome": outcome.value if hasattr(outcome, "value") else str(outcome)},
+                    observed_at=now,
+                ),
             )
 
-        # 7. Successful fetch: extract fields
+        # 7. Successful fetch: extract, normalize, fingerprint, diff
         extracted_results: Dict[str, ExtractionResult] = {}
-        extracted_values: Dict[str, Any] = {}
+        normalized_values: Dict[str, str] = {}
+        fingerprints: Dict[str, str] = {}
+        previous_values: Dict[str, str] = {}
+        diffs: Dict[str, DiffResult] = {}
         has_failures = False
+
+        # Recover previous normalized values from target metadata if available.
+        stored_previous = ((self.target.metadata or {}).get("normalized_values") or {}) if isinstance(self.target.metadata, dict) else {}
 
         for ext in self.extractors:
             result = DOMExtractor.extract(fetch_res.content, ext)
             extracted_results[ext.name] = result
+
             if not result.is_found:
                 has_failures = True
-            else:
-                extracted_values[ext.name] = result.value
+                normalized_values[ext.name] = ""
+                fingerprints[ext.name] = ""
+                previous_values[ext.name] = stored_previous.get(ext.name, "")
+                diffs[ext.name] = DiffResult.unchanged("", "")
+                continue
 
-        # 8. Content-hash change detection with false-positive guards
-        new_hash = hashlib.sha256(fetch_res.content.encode("utf-8")).hexdigest()
-        prev_hash = self.target.content_hash
-        should_emit = False
-        emit_reason = "Content identical, no signal emitted"
+            raw_value = result.value or ""
+            normalized = normalize_extracted_text(raw_value)
+            selector_fp = selector_config_fingerprint(ext.selector_type, ext.selector)
+            fp = observation_fingerprint(
+                target_id=self.target.id,
+                normalized_content=normalized,
+                selector_fingerprint=selector_fp,
+            )
 
-        if prev_hash is None or not self.target.metadata.get("initialized"):
-            should_emit = True
-            emit_reason = "Initial fetch"
-        elif prev_hash != new_hash:
-            # Content changed; if configured extractors all failed to match, suppress as a likely false positive
-            if self.extractors and all(not extracted_results[e.name].is_found for e in self.extractors):
-                should_emit = False
-                emit_reason = "Content changed but all configured extractors failed; suppressing as potential false positive"
-            else:
-                should_emit = True
-                emit_reason = "Content changed with at least one successful extraction"
+            prev = stored_previous.get(ext.name, "")
+            diff = compute_diff(prev, normalized)
+
+            normalized_values[ext.name] = normalized
+            fingerprints[ext.name] = fp
+            previous_values[ext.name] = prev
+            diffs[ext.name] = diff
+
+        # 8. Determine observation status and signals
+        # First observation: establish baseline, do NOT emit a fake change event.
+        is_first_observation = not bool(self.target.metadata and self.target.metadata.get("initialized"))
+
+        any_changed = any(d.changed for d in diffs.values())
+        all_extractors_failed = bool(self.extractors) and all(not v.is_found for v in extracted_results.values())
+
+        if is_first_observation:
+            observation_status = ObservationStatus.FIRST_OBSERVATION
+            should_emit_signal = False
+            emit_reason = "First successful fetch; baseline established"
+        elif all_extractors_failed:
+            observation_status = ObservationStatus.EXTRACTION_FAILURE
+            should_emit_signal = False
+            emit_reason = "All extractors failed; potential selector or content change"
+        elif any_changed:
+            observation_status = ObservationStatus.CHANGED
+            should_emit_signal = True
+            emit_reason = "At least one extractor produced a changed normalized value"
         else:
-            should_emit = False
-            emit_reason = "Content identical, no signal emitted"
+            observation_status = ObservationStatus.UNCHANGED
+            should_emit_signal = False
+            emit_reason = "All normalized values identical to previous observation"
 
+        # 9. Build evidence chain
+        evidence = {
+            "target_id": self.target.id,
+            "url": self.target.url,
+            "status_code": fetch_res.status_code,
+            "observed_at": now.isoformat(),
+            "extractor_results": {
+                name: {
+                    "status": result.status.value,
+                    "raw_value": result.raw_value,
+                    "normalized_value": normalized_values.get(name, ""),
+                    "fingerprint": fingerprints.get(name, ""),
+                    "previous_value": previous_values.get(name, ""),
+                    "changed": diffs.get(name, DiffResult.unchanged("", "")).changed,
+                    "diff_summary": diffs.get(name, DiffResult.unchanged("", "")).summary,
+                }
+                for name, result in extracted_results.items()
+            },
+        }
+
+        observation = ObservationResult(
+            target_id=self.target.id,
+            status=observation_status,
+            status_code=fetch_res.status_code,
+            extracted_results=extracted_results,
+            normalized_values=normalized_values,
+            fingerprints=fingerprints,
+            diffs=diffs,
+            previous_values=previous_values,
+            evidence=evidence,
+            observed_at=now,
+            reason=emit_reason,
+        )
+
+        # 10. Build signals and durable-state updates
         signals: List[Any] = []
         updated_metadata = dict(self.target.metadata or {})
-        if should_emit:
-            updated_content_hash = new_hash
-            updated_metadata["initialized"] = True
-            updated_metadata["last_extracted"] = {k: v.value for k, v in extracted_results.items() if v.is_found}
+        updated_content_hash = self.target.content_hash
 
+        # Always persist normalized values on successful fetch so that
+        # first observation establishes a baseline and subsequent observations
+        # can diff against it.
+        updated_metadata["normalized_values"] = normalized_values
+        updated_metadata["last_extracted"] = {
+            k: v.value for k, v in extracted_results.items() if v.is_found
+        }
+
+        if is_first_observation:
+            updated_metadata["initialized"] = True
+            should_emit_signal = False
+            emit_reason = "First successful fetch; baseline established"
+        elif should_emit_signal:
+            pass  # already determined above
+        else:
+            pass  # unchanged or extraction failure
+
+        if should_emit_signal:
+            # Composite payload for downstream Signal/Event creation.
             payload = {
                 "target_id": self.target.id,
                 "url": self.target.url,
-                "extracted_values": extracted_values,
-                "extraction_results": {k: {"status": v.status.value, "value": v.value} for k, v in extracted_results.items()},
-                "content_hash": new_hash,
-                "previous_hash": prev_hash,
+                "observation_status": observation_status,
+                "extracted_values": {k: v.value for k, v in extracted_results.items() if v.is_found},
+                "normalized_values": normalized_values,
+                "fingerprints": fingerprints,
+                "diffs": {
+                    name: {
+                        "changed": diff.changed,
+                        "before": diff.before,
+                        "after": diff.after,
+                        "summary": diff.summary,
+                        "regions": diff.regions,
+                    }
+                    for name, diff in diffs.items()
+                },
                 "status_code": fetch_res.status_code,
                 "captured_at": now.isoformat(),
             }
@@ -224,8 +375,17 @@ class GenericWebTarget:
                 sig_obj = payload
 
             signals.append(sig_obj)
+
+        # 11. Determine outcome
+        if signals:
+            outcome = ExecutionOutcome.SUCCESS_CHANGED
+        elif has_failures:
+            if all_extractors_failed:
+                outcome = ExecutionOutcome.SELECTOR_NOT_FOUND
+            else:
+                outcome = ExecutionOutcome.TRANSFORM_ERROR
         else:
-            updated_content_hash = prev_hash
+            outcome = ExecutionOutcome.SUCCESS_UNCHANGED
 
         return TargetExecutionResult(
             target_id=self.target.id,
@@ -234,7 +394,7 @@ class GenericWebTarget:
             new_status=observed_status,
             signals_emitted=signals,
             extracted_results=extracted_results,
-            extracted_values=extracted_values,
+            extracted_values={k: v.value for k, v in extracted_results.items() if v.is_found},
             is_304=False,
             has_extraction_failures=has_failures,
             reason=emit_reason,
@@ -245,4 +405,16 @@ class GenericWebTarget:
             consecutive_failures=observed_consecutive_failures,
             next_allowed_at=observed_next_allowed_at,
             last_fetched_at=observed_last_fetched_at,
+            outcome=outcome,
+            transition=transition_for(
+                outcome,
+                target=self.target,
+                now=now,
+                etag=updated_etag,
+                last_modified=updated_last_modified,
+                content_hash=updated_content_hash,
+                metadata=updated_metadata,
+                emit_signal=bool(signals),
+            ),
+            observation=observation,
         )
