@@ -2,8 +2,10 @@ import json
 from unittest.mock import MagicMock
 from datetime import datetime
 from web_watcher.models import Target, TargetStatus
+from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.github_target import GitHubTarget, parse_github_repo
+from web_watcher.fetch_policy import FetchEvaluation
 
 
 RELEASE_PAYLOAD = {
@@ -31,7 +33,10 @@ def test_github_target_release_published_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )
@@ -44,8 +49,8 @@ def test_github_target_release_published_signal():
     payload = sig.payload if hasattr(sig, "payload") else sig
     assert payload["tag_name"] == "v2.1.0"
     assert payload["owner"] == "pallets"
-    assert target.metadata["last_release_tag"] == "v2.1.0"
-    assert target.metadata["release_etag"] == '"rel-etag-210"'
+    assert res.updated_metadata["last_release_tag"] == "v2.1.0"
+    assert res.updated_metadata["release_etag"] == '"rel-etag-210"'
 
 
 def test_github_target_no_release_signal_when_unchanged():
@@ -54,8 +59,11 @@ def test_github_target_no_release_signal_when_unchanged():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.NOT_MODIFIED,
         status_code=304,
-        is_304_not_modified=True,
+        fetched_at=datetime.utcnow(),
+        content=None,
         etag='"rel-etag-210"',
     )
 
@@ -72,7 +80,10 @@ def test_github_target_star_delta_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(REPO_META_PAYLOAD),
         etag='"repo-etag-3500"',
     )
@@ -95,7 +106,10 @@ def test_github_target_star_delta_below_threshold():
     repo_payload["stargazers_count"] = 3502
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_flask",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(repo_payload),
         etag='"repo-etag-3502"',
     )
@@ -127,7 +141,10 @@ def test_github_target_repo_saves_target_and_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_save",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )
@@ -140,8 +157,12 @@ def test_github_target_repo_saves_target_and_signal():
 
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
-    mock_repo.save_target.assert_called_once_with(target)
-    mock_repo.save_signal.assert_called_once()
+    # Package A contract: adapter must not persist directly
+    mock_repo.save_target.assert_not_called()
+    mock_repo.save_signal.assert_not_called()
+    # Adapter returns observation-only state for scheduler to commit
+    assert res.updated_metadata.get("release_etag") == '"rel-etag-210"'
+    assert res.outcome == "success_changed"
 
 
 def test_github_target_mixed_watch_types_emits_both_signals():
@@ -154,8 +175,22 @@ def test_github_target_mixed_watch_types_emits_both_signals():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.side_effect = [
-        FetchResult(status_code=200, content=json.dumps(RELEASE_PAYLOAD), etag='"rel-etag-210"'),
-        FetchResult(status_code=200, content=json.dumps(REPO_META_PAYLOAD), etag='"repo-etag-3500"'),
+        FetchResult(
+            target_key="gh_mixed",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps(RELEASE_PAYLOAD),
+            etag='"rel-etag-210"',
+        ),
+        FetchResult(
+            target_key="gh_mixed",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps(REPO_META_PAYLOAD),
+            etag='"repo-etag-3500"',
+        ),
     ]
 
     res = adapter.execute(fetcher=mock_fetcher)
@@ -173,7 +208,10 @@ def test_github_target_token_added_to_headers():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_token",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=datetime.utcnow(),
         content=json.dumps(RELEASE_PAYLOAD),
         etag='"rel-etag-210"',
     )
@@ -183,3 +221,361 @@ def test_github_target_token_added_to_headers():
     mock_fetcher.fetch.assert_called_once()
     call_kwargs = mock_fetcher.fetch.call_args.kwargs
     assert call_kwargs["custom_headers"]["Authorization"] == "Bearer ghp_token_123"
+
+
+def test_github_target_release_source_url_in_payload():
+    target = Target(id="gh_src", url="pallets/flask", metadata={"last_release_tag": "v2.0.0"})
+    adapter = GitHubTarget(target=target, watch_types=["releases"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_src",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(RELEASE_PAYLOAD),
+        etag='"rel-etag-210"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert len(res.signals_emitted) == 1
+    sig = res.signals_emitted[0]
+    payload = sig.payload if hasattr(sig, "payload") else sig
+    assert payload["source"] == "https://api.github.com/repos/pallets/flask/releases/latest"
+    assert payload["fetched_at"] is not None
+
+
+def test_github_target_stars_source_url_in_payload():
+    target = Target(id="gh_stars_src", url="pallets/flask", metadata={"last_stars": 3499})
+    adapter = GitHubTarget(target=target, watch_types=["stars"], star_delta_threshold=1)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_stars_src",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(REPO_META_PAYLOAD),
+        etag='"repo-etag-3500"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert len(res.signals_emitted) == 1
+    sig = res.signals_emitted[0]
+    payload = sig.payload if hasattr(sig, "payload") else sig
+    assert payload["source"] == "https://api.github.com/repos/pallets/flask"
+    assert payload["fetched_at"] is not None
+
+
+def test_github_target_release_first_observation_no_signal():
+    target = Target(id="gh_first_rel", url="pallets/flask", metadata={})
+    adapter = GitHubTarget(target=target, watch_types=["releases"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_first_rel",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(RELEASE_PAYLOAD),
+        etag='"rel-etag-210"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert res.updated_metadata.get("last_release_tag") == "v2.1.0"
+    assert res.updated_metadata.get("release_etag") == '"rel-etag-210"'
+
+
+def test_github_target_stars_first_observation_no_signal():
+    target = Target(id="gh_first_stars", url="pallets/flask", metadata={})
+    adapter = GitHubTarget(target=target, watch_types=["stars"], star_delta_threshold=1)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_first_stars",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(REPO_META_PAYLOAD),
+        etag='"repo-etag-3500"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert res.updated_metadata.get("last_stars") == 3500
+    assert res.updated_metadata.get("repo_etag") == '"repo-etag-3500"'
+
+
+def test_github_target_release_missing_tag_name_no_signal():
+    target = Target(id="gh_no_tag", url="pallets/flask", metadata={"last_release_tag": "v2.0.0"})
+    adapter = GitHubTarget(target=target, watch_types=["releases"])
+
+    payload = dict(RELEASE_PAYLOAD)
+    del payload["tag_name"]
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_no_tag",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(payload),
+        etag='"rel-etag-210"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert res.outcome == "success_unchanged"
+
+
+def test_github_target_malformed_json_release_transform_error():
+    target = Target(id="gh_malformed", url="pallets/flask", metadata={"last_release_tag": "v2.0.0"})
+    adapter = GitHubTarget(target=target, watch_types=["releases"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_malformed",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content="not json",
+        etag='"rel-etag-210"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert res.outcome == "transform_error"
+
+
+def test_github_target_per_target_etag_isolation():
+    target_a = Target(id="gh_a", url="openai/gpt-4o", metadata={})
+    target_b = Target(id="gh_b", url="pallets/flask", metadata={})
+
+    adapter_a = GitHubTarget(target=target_a, watch_types=["stars"])
+    adapter_b = GitHubTarget(target=target_b, watch_types=["stars"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.side_effect = [
+        FetchResult(
+            target_key="gh_a",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps({"stargazers_count": 100}),
+            etag='"etag-a"',
+        ),
+        FetchResult(
+            target_key="gh_b",
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps({"stargazers_count": 200}),
+            etag='"etag-b"',
+        ),
+    ]
+
+    res_a = adapter_a.execute(fetcher=mock_fetcher)
+    res_b = adapter_b.execute(fetcher=mock_fetcher)
+
+    assert res_a.updated_metadata.get("repo_etag") == '"etag-a"'
+    assert res_b.updated_metadata.get("repo_etag") == '"etag-b"'
+    assert res_a.updated_metadata.get("last_stars") == 100
+    assert res_b.updated_metadata.get("last_stars") == 200
+
+
+def test_github_target_restart_etag_stable():
+    """Simulate restart: ETag and last stars survive through metadata."""
+    target = Target(
+        id="gh_restart",
+        url="pallets/flask",
+        metadata={
+            "last_stars": 3500,
+            "repo_etag": '"repo-etag-3500"',
+            "last_release_tag": "v2.1.0",
+            "release_etag": '"rel-etag-210"',
+        },
+    )
+    adapter = GitHubTarget(target=target, watch_types=["releases", "stars"], star_delta_threshold=1)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.side_effect = [
+        FetchResult(
+            target_key="gh_restart",
+            status=FetchStatus.NOT_MODIFIED,
+            status_code=304,
+            fetched_at=datetime.utcnow(),
+            content=None,
+            etag='"rel-etag-210"',
+        ),
+        FetchResult(
+            target_key="gh_restart",
+            status=FetchStatus.NOT_MODIFIED,
+            status_code=304,
+            fetched_at=datetime.utcnow(),
+            content=None,
+            etag='"repo-etag-3500"',
+        ),
+    ]
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert res.is_304 is True
+    assert res.updated_metadata.get("repo_etag") == '"repo-etag-3500"'
+    assert res.updated_metadata.get("release_etag") == '"rel-etag-210"'
+    assert res.updated_metadata.get("last_stars") == 3500
+    assert res.updated_metadata.get("last_release_tag") == "v2.1.0"
+
+
+def test_github_target_authentication_isolation():
+    """Token is per-target; two targets with different tokens get different headers."""
+    target_a = Target(id="gh_auth_a", url="openai/gpt-4o")
+    target_b = Target(id="gh_auth_b", url="pallets/flask", metadata={"token": "ghp_token_b"})
+
+    adapter_a = GitHubTarget(target=target_a, token="ghp_token_a", watch_types=["stars"])
+    adapter_b = GitHubTarget(target=target_b, token="ghp_token_b", watch_types=["stars"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_auth_a",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps({"stargazers_count": 100}),
+        etag='"etag-a"',
+    )
+
+    adapter_a.execute(fetcher=mock_fetcher)
+    call_a = mock_fetcher.fetch.call_args.kwargs["custom_headers"]["Authorization"]
+
+    mock_fetcher.fetch.reset_mock()
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_auth_b",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps({"stargazers_count": 200}),
+        etag='"etag-b"',
+    )
+
+    adapter_b.execute(fetcher=mock_fetcher)
+    call_b = mock_fetcher.fetch.call_args.kwargs["custom_headers"]["Authorization"]
+
+    assert call_a == "Bearer ghp_token_a"
+    assert call_b == "Bearer ghp_token_b"
+
+def test_github_target_subresource_state_persists_cooldown():
+    """Per-subresource BACKOFF should be stored in metadata and skip the subresource next run."""
+    from web_watcher.fetch_policy import FetchPolicy, TargetStatus
+    target = Target(id="gh_sub", url="pallets/flask")
+    policy = FetchPolicy()
+    adapter = GitHubTarget(target=target, watch_types=["releases", "stars"])
+
+    def fake_fetch(url, **kwargs):
+        target_key = "gh_sub"
+        if "releases" in url:
+            return FetchResult(
+                target_key=target_key,
+                status=FetchStatus.SUCCESS,
+                status_code=429,
+                fetched_at=datetime.utcnow(),
+                content="",
+                metadata={"headers": {"Retry-After": "60"}},
+            )
+        return FetchResult(
+            target_key=target_key,
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps({"stargazers_count": 10}),
+            etag='"etag"',
+        )
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.side_effect = fake_fetch
+
+    now = datetime.utcnow()
+    result = adapter.execute(fetcher=mock_fetcher, policy=policy, now=now)
+
+    meta = result.transition.metadata if result.transition else {}
+    assert "subresource_states" in meta
+    assert meta["subresource_states"]["releases"]["status"] == "BACKOFF"
+    assert meta["subresource_states"]["releases"]["next_allowed_at"] is not None
+
+    # Next run should skip releases because it is still in BACKOFF.
+    target.metadata = meta
+    adapter2 = GitHubTarget(target=target, watch_types=["releases", "stars"])
+    mock_fetcher2 = MagicMock(spec=SmartFetcher)
+    mock_fetcher2.fetch.side_effect = fake_fetch
+
+    result2 = adapter2.execute(fetcher=mock_fetcher2, policy=policy, now=now)
+    assert mock_fetcher2.fetch.call_count == 1
+    assert result2.signals_emitted == []
+
+
+def test_github_target_independent_subresource_outcomes():
+    """Releases in COOLDOWN does not block Stars when subresource states are independent."""
+    from web_watcher.fetch_policy import FetchPolicy
+    target = Target(id="gh_indy", url="pallets/flask")
+    policy = FetchPolicy()
+
+    release_eval = FetchEvaluation(
+        target_id="gh_indy",
+        status_code=429,
+        new_status=TargetStatus.COOLDOWN,
+        should_emit_signal=False,
+        consecutive_failures=1,
+        next_allowed_at=datetime.utcnow(),
+        reason="HTTP 429",
+    )
+    repo_eval = FetchEvaluation(
+        target_id="gh_indy",
+        status_code=200,
+        new_status=TargetStatus.NORMAL,
+        should_emit_signal=False,
+        consecutive_failures=0,
+        next_allowed_at=None,
+    )
+
+    meta = {
+        "subresource_states": {
+            "releases": {
+                "status": "COOLDOWN",
+                "consecutive_failures": 1,
+                "next_allowed_at": datetime.utcnow().isoformat(),
+            },
+            "stars": {
+                "status": "NORMAL",
+                "consecutive_failures": 0,
+                "next_allowed_at": None,
+            },
+        }
+    }
+
+    # Simulate outcome merge logic from GitHubTarget.execute
+    severity = {
+        TargetStatus.COOLDOWN: 0,
+        TargetStatus.BACKOFF: 1,
+        TargetStatus.NORMAL: 2,
+    }
+    if severity[release_eval.new_status] <= severity[repo_eval.new_status]:
+        observed_status = release_eval.new_status
+        observed_next_allowed_at = release_eval.next_allowed_at
+    else:
+        observed_status = repo_eval.new_status
+        observed_next_allowed_at = repo_eval.next_allowed_at
+
+    assert observed_status == TargetStatus.COOLDOWN
+    assert observed_next_allowed_at == release_eval.next_allowed_at

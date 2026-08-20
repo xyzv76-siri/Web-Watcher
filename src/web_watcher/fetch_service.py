@@ -1,40 +1,10 @@
-"""Single-fetch service.
+"""TEST_ONLY: Single-fetch service.
 
-Orchestrates one fetch for one target:
+This module bypasses the production fencing/atomic-finalization path and must
+NOT be imported or used from scheduled_runner.py or any production orchestration
+code. It exists solely for unit/integration tests and ad-hoc fetch tooling.
 
-    FetchRequest
-        ↓
-    Adapter (resolved by adapter registry)
-        ↓
-    FetchResult
-        ↓
-    Persistence (FetchState upsert + optional Signal creation)
-
-The service performs exactly one fetch operation.
-It is NOT a scheduler, does NOT sleep, and does NOT run forever.
-
-Persistence semantics (Phase 7):
-
-    * 304 Not Modified
-        - does NOT replace content_hash
-        - does NOT create a new Signal
-        - preserves etag, last_modified, content_hash
-        - does NOT update fetched_at (existing state is authoritative)
-
-    * 200 with NEW content_hash
-        - upserts FetchState (etag, last_modified, content_hash, fetched_at)
-        - resolves target to a canonical Entity (creating it if absent)
-        - creates exactly one Signal with a deterministic fingerprint
-
-    * 200 with UNCHANGED content_hash
-        - upserts FetchState (etag, last_modified, fetched_at)
-        - does NOT create another Signal
-
-    * Failed FetchResult
-        - does NOT update content_hash
-        - does NOT create a new Signal
-        - does NOT destroy previous FetchState
-        - returns the failure result to the caller
+Production path: adapter.execute() → finalize_execution() / commit_target_execution().
 """
 
 from __future__ import annotations
@@ -45,7 +15,7 @@ from typing import Optional
 from .signal_types import SignalType
 from .adapters import AdapterRegistry
 from .content_hash import sha256_of
-from .fetch import FetchRequest, FetchResult
+from .fetch import FetchRequest, FetchResult, FetchStatus
 from .fingerprint import fingerprint_for_signal
 from .models import Entity, FetchState, Signal
 from .repository import Repository
@@ -133,17 +103,18 @@ class FetchService:
     ) -> None:
         """Persist a FetchResult according to the Phase 7 rules."""
 
-        if not result.success:
+        # ---- Non-success / failure states ------------------------------------
+        if result.status not in (FetchStatus.SUCCESS, FetchStatus.NOT_MODIFIED):
             # Failed fetch → do NOT overwrite previous FetchState,
             # do NOT create a Signal, do NOT destroy previous state.
             return
 
         # ---- 304 Not Modified ------------------------------------------------
-        if result.status_code == 304:
+        if result.status == FetchStatus.NOT_MODIFIED:
             # Preserve everything: etag, last_modified, content_hash, fetched_at.
             return
 
-        # ---- 200 with content ------------------------------------------------
+        # ---- SUCCESS with content --------------------------------------------
         if result.content is None or result.status_code != 200:
             # No content (204 / empty) → nothing to persist as state or signal.
             return

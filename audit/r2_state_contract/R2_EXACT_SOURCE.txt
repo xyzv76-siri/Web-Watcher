@@ -1,0 +1,2910 @@
+============================================================
+R2 EXACT SOURCE SNAPSHOT
+============================================================
+2026-08-19T05:26:41+00:00
+ROOT=/run/csi/mount-root/nas/4079184d856ecc166ed19d4887083405/workspaces/default/web-watcher
+HEAD=d0c4ab06b1e79f2063f21a2203ab112c2ab75a13
+
+
+############################################################
+### FILE: src/web_watcher/fetch.py
+############################################################
+     1	"""Fetcher and source-adapter contracts.
+     2	
+     3	This module defines interfaces only.
+     4	No network access is performed here.
+     5	"""
+     6	
+     7	from dataclasses import dataclass, field
+     8	from datetime import datetime
+     9	from typing import Mapping, Optional, Protocol, Sequence
+    10	
+    11	from .targets import WatchTarget
+    12	
+    13	
+    14	@dataclass(frozen=True)
+    15	class FetchRequest:
+    16	    """Immutable request sent to a source adapter."""
+    17	
+    18	    target: WatchTarget
+    19	    etag: Optional[str] = None
+    20	    last_modified: Optional[str] = None
+    21	
+    22	
+    23	@dataclass(frozen=True)
+    24	class FetchResult:
+    25	    """Immutable result returned by a source adapter."""
+    26	
+    27	    target_key: str
+    28	    success: bool
+    29	    status_code: Optional[int]
+    30	    fetched_at: datetime
+    31	    content: Optional[str] = None
+    32	    content_type: Optional[str] = None
+    33	    etag: Optional[str] = None
+    34	    last_modified: Optional[str] = None
+    35	    content_hash: Optional[str] = None
+    36	    error: Optional[str] = None
+    37	    metadata: Mapping[str, str] = field(default_factory=dict)
+    38	
+    39	
+    40	class Fetcher(Protocol):
+    41	    """Protocol for any object that can fetch a single target."""
+    42	
+    43	    def fetch(self, request: FetchRequest) -> FetchResult: ...
+    44	
+    45	
+    46	class SourceAdapter(Protocol):
+    47	    """Protocol for a target-type-specific fetch implementation."""
+    48	
+    49	    def supports(self, target: WatchTarget) -> bool: ...
+    50	
+    51	    def fetch(self, request: FetchRequest) -> FetchResult: ...
+    52	
+    53	
+    54	def select_adapter(
+    55	    target: WatchTarget,
+    56	    adapters: Sequence[SourceAdapter],
+    57	) -> SourceAdapter:
+    58	    """Select exactly one adapter for a target.
+    59	
+    60	    Raises LookupError when zero or multiple adapters match.
+    61	    """
+    62	    matches = [
+    63	        adapter
+    64	        for adapter in adapters
+    65	        if adapter.supports(target)
+    66	    ]
+    67	
+    68	    if not matches:
+    69	        raise LookupError(
+    70	            f"no adapter available for target: {target.key}"
+    71	        )
+    72	
+    73	    if len(matches) > 1:
+    74	        raise LookupError(
+    75	            f"multiple adapters available for target: {target.key}"
+    76	        )
+    77	
+    78	    return matches[0]
+
+############################################################
+### FILE: src/web_watcher/fetcher.py
+############################################################
+     1	"""HTTP fetcher with polite caching and timeout handling."""
+     2	
+     3	from dataclasses import dataclass
+     4	from typing import Optional, Dict, Any
+     5	import requests
+     6	from requests.exceptions import RequestException
+     7	
+     8	
+     9	@dataclass
+    10	class FetchResult:
+    11	    """Result of a fetch operation."""
+    12	    status_code: Optional[int]
+    13	    content: Optional[str] = None
+    14	    etag: Optional[str] = None
+    15	    last_modified: Optional[str] = None
+    16	    is_304_not_modified: bool = False
+    17	    error: Optional[str] = None
+    18	    headers: Optional[Dict[str, str]] = None
+    19	
+    20	
+    21	class SmartFetcher:
+    22	    """Polite web fetcher with ETag/Last-Modified support and timeout handling."""
+    23	
+    24	    def __init__(self, default_timeout: float = 10.0):
+    25	        self.default_timeout = default_timeout
+    26	        self.session = requests.Session()
+    27	        self.session.headers.update({
+    28	            "User-Agent": "WebWatcher/1.0 (https://github.com/xyzv76-siri/Web-Watcher)",
+    29	            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    30	            "Accept-Language": "en-US,en;q=0.5",
+    31	            "Accept-Encoding": "gzip, deflate",
+    32	            "Connection": "keep-alive",
+    33	        })
+    34	
+    35	    def fetch(
+    36	        self,
+    37	        url: str,
+    38	        custom_headers: Optional[Dict[str, str]] = None,
+    39	        etag: Optional[str] = None,
+    40	        last_modified: Optional[str] = None,
+    41	        timeout: Optional[float] = None,
+    42	    ) -> FetchResult:
+    43	        timeout = timeout or self.default_timeout
+    44	        headers = dict(self.session.headers)
+    45	        if custom_headers:
+    46	            headers.update(custom_headers)
+    47	        if etag:
+    48	            headers["If-None-Match"] = etag
+    49	        if last_modified:
+    50	            headers["If-Modified-Since"] = last_modified
+    51	
+    52	        try:
+    53	            response = self.session.get(
+    54	                url,
+    55	                headers=headers,
+    56	                timeout=timeout,
+    57	                allow_redirects=True,
+    58	            )
+    59	            is_304 = response.status_code == 304
+    60	            return FetchResult(
+    61	                status_code=response.status_code,
+    62	                content=response.text if not is_304 else None,
+    63	                etag=response.headers.get("ETag"),
+    64	                last_modified=response.headers.get("Last-Modified"),
+    65	                is_304_not_modified=is_304,
+    66	                error=None,
+    67	                headers=dict(response.headers),
+    68	            )
+    69	        except RequestException as e:
+    70	            return FetchResult(
+    71	                status_code=None,
+    72	                content=None,
+    73	                etag=None,
+    74	                last_modified=None,
+    75	                is_304_not_modified=False,
+    76	                error=str(e),
+    77	                headers=None,
+    78	            )
+    79	
+    80	    def close(self) -> None:
+    81	        """Close the underlying session."""
+    82	        self.session.close()
+    83	
+    84	    def __enter__(self):
+    85	        return self
+    86	
+    87	    def __exit__(self, exc_type, exc_val, exc_tb):
+    88	        self.close()
+    89	        return False
+
+############################################################
+### FILE: src/web_watcher/fetch_service.py
+############################################################
+     1	"""Single-fetch service.
+     2	
+     3	Orchestrates one fetch for one target:
+     4	
+     5	    FetchRequest
+     6	        ↓
+     7	    Adapter (resolved by adapter registry)
+     8	        ↓
+     9	    FetchResult
+    10	        ↓
+    11	    Persistence (FetchState upsert + optional Signal creation)
+    12	
+    13	The service performs exactly one fetch operation.
+    14	It is NOT a scheduler, does NOT sleep, and does NOT run forever.
+    15	
+    16	Persistence semantics (Phase 7):
+    17	
+    18	    * 304 Not Modified
+    19	        - does NOT replace content_hash
+    20	        - does NOT create a new Signal
+    21	        - preserves etag, last_modified, content_hash
+    22	        - does NOT update fetched_at (existing state is authoritative)
+    23	
+    24	    * 200 with NEW content_hash
+    25	        - upserts FetchState (etag, last_modified, content_hash, fetched_at)
+    26	        - resolves target to a canonical Entity (creating it if absent)
+    27	        - creates exactly one Signal with a deterministic fingerprint
+    28	
+    29	    * 200 with UNCHANGED content_hash
+    30	        - upserts FetchState (etag, last_modified, fetched_at)
+    31	        - does NOT create another Signal
+    32	
+    33	    * Failed FetchResult
+    34	        - does NOT update content_hash
+    35	        - does NOT create a new Signal
+    36	        - does NOT destroy previous FetchState
+    37	        - returns the failure result to the caller
+    38	"""
+    39	
+    40	from __future__ import annotations
+    41	
+    42	from datetime import datetime, timezone
+    43	from typing import Optional
+    44	
+    45	from .signal_types import SignalType
+    46	from .adapters import AdapterRegistry
+    47	from .content_hash import sha256_of
+    48	from .fetch import FetchRequest, FetchResult
+    49	from .fingerprint import fingerprint_for_signal
+    50	from .models import Entity, FetchState, Signal
+    51	from .repository import Repository
+    52	from .targets import WatchTarget
+    53	
+    54	
+    55	# Canonical signal type used for "content changed" observations.
+    56	_SIGNAL_TYPE_CONTENT_CHANGE = SignalType.CONTENT_CHANGE.value
+    57	
+    58	
+    59	def _canonical_entity_key(target: WatchTarget) -> str:
+    60	    """Map a WatchTarget key to a stable Entity canonical_key.
+    61	
+    62	    Example: 'github:octocat/Hello-World' -> 'github:octocat/Hello-World'.
+    63	    The canonical key preserves the locator so that repeated fetches for
+    64	    the same target always resolve to the same Entity.
+    65	    """
+    66	    return target.key
+    67	
+    68	
+    69	def _canonical_entity_name(target: WatchTarget) -> str:
+    70	    return target.name
+    71	
+    72	
+    73	def _canonical_entity_type(target: WatchTarget) -> str:
+    74	    return target.target_type
+    75	
+    76	
+    77	class FetchService:
+    78	    """Executes a single fetch-and-persist cycle for one target."""
+    79	
+    80	    def __init__(
+    81	        self,
+    82	        repository: Repository,
+    83	        adapter_registry: Optional[AdapterRegistry] = None,
+    84	    ):
+    85	        self._repo = repository
+    86	        self._registry = adapter_registry or AdapterRegistry()
+    87	
+    88	    # ------------------------------------------------------------------
+    89	    # Public API
+    90	    # ------------------------------------------------------------------
+    91	
+    92	    def fetch_one(self, target: WatchTarget) -> FetchResult:
+    93	        """Fetch *target* exactly once and persist the result.
+    94	
+    95	        Returns the FetchResult (may be success or failure).
+    96	        """
+    97	        adapter = self._registry.resolve(target)
+    98	
+    99	        # Capture prior state *before* the fetch so we can decide whether
+   100	        # the new result represents a real content change.
+   101	        prior = self._repo.get_fetch_state(target.key)
+   102	
+   103	        request = self._build_request(target, prior)
+   104	        result = adapter.fetch(request)
+   105	
+   106	        self._apply_result(target, prior, result)
+   107	
+   108	        return result
+   109	
+   110	    # ------------------------------------------------------------------
+   111	    # Persistence helpers
+   112	    # ------------------------------------------------------------------
+   113	
+   114	    def _build_request(
+   115	        self,
+   116	        target: WatchTarget,
+   117	        prior: Optional[FetchState],
+   118	    ) -> FetchRequest:
+   119	        if prior is None:
+   120	            return FetchRequest(target=target)
+   121	
+   122	        return FetchRequest(
+   123	            target=target,
+   124	            etag=prior.etag,
+   125	            last_modified=prior.last_modified,
+   126	        )
+   127	
+   128	    def _apply_result(
+   129	        self,
+   130	        target: WatchTarget,
+   131	        prior: Optional[FetchState],
+   132	        result: FetchResult,
+   133	    ) -> None:
+   134	        """Persist a FetchResult according to the Phase 7 rules."""
+   135	
+   136	        if not result.success:
+   137	            # Failed fetch → do NOT overwrite previous FetchState,
+   138	            # do NOT create a Signal, do NOT destroy previous state.
+   139	            return
+   140	
+   141	        # ---- 304 Not Modified ------------------------------------------------
+   142	        if result.status_code == 304:
+   143	            # Preserve everything: etag, last_modified, content_hash, fetched_at.
+   144	            return
+   145	
+   146	        # ---- 200 with content ------------------------------------------------
+   147	        if result.content is None or result.status_code != 200:
+   148	            # No content (204 / empty) → nothing to persist as state or signal.
+   149	            return
+   150	
+   151	        content_hash = result.content_hash or sha256_of(result.content)
+   152	
+   153	        # Did this observation represent a real content change?
+   154	        previous_hash = prior.content_hash if prior is not None else None
+   155	        new_hash = previous_hash is None or content_hash != previous_hash
+   156	
+   157	        # Update FetchState with fresh metadata (etag, last_modified, fetched_at)
+   158	        self._repo.upsert_fetch_state(
+   159	            FetchState(
+   160	                target_key=result.target_key,
+   161	                etag=result.etag,
+   162	                last_modified=result.last_modified,
+   163	                content_hash=content_hash,
+   164	                fetched_at=result.fetched_at,
+   165	            )
+   166	        )
+   167	
+   168	        if not new_hash:
+   169	            # Content unchanged → do NOT create another Signal.
+   170	            return
+   171	
+   172	        # Resolve or create the canonical Entity for this target.
+   173	        entity = self._repo.get_or_create_entity(
+   174	            canonical_key=_canonical_entity_key(target),
+   175	            name=_canonical_entity_name(target),
+   176	            entity_type=_canonical_entity_type(target),
+   177	        )
+   178	
+   179	        # Deterministic fingerprint so the same observation never
+   180	        # produces duplicate Signal rows.
+   181	        fingerprint = fingerprint_for_signal(
+   182	            entity_id=entity.id,
+   183	            signal_type=_SIGNAL_TYPE_CONTENT_CHANGE,
+   184	            value=content_hash,
+   185	        )
+   186	
+   187	        # create_signal() uses the UNIQUE(entity_id, signal_type, fingerprint)
+   188	        # constraint to skip duplicates.
+   189	        self._repo.create_signal(
+   190	            entity_id=entity.id,
+   191	            signal_type=_SIGNAL_TYPE_CONTENT_CHANGE,
+   192	            observed_at=result.fetched_at,
+   193	            value=content_hash,
+   194	            fingerprint=fingerprint,
+   195	        )
+
+############################################################
+### FILE: src/web_watcher/fetch_policy.py
+############################################################
+     1	import re
+     2	import random
+     3	import email.utils
+     4	from dataclasses import dataclass, field
+     5	from datetime import datetime, timedelta, timezone
+     6	from typing import Optional, Dict, Any, List
+     7	from web_watcher.models import Target, TargetStatus
+     8	
+     9	
+    10	def _to_utc_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    11	    if dt is None:
+    12	        return None
+    13	    if dt.tzinfo is not None:
+    14	        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    15	    return dt
+    16	
+    17	
+    18	def parse_interval_seconds(interval_str: str) -> float:
+    19	    s = interval_str.strip().lower()
+    20	    m = re.match(r"^(\d+)([smhd])$", s)
+    21	    if not m:
+    22	        try:
+    23	            return float(s)
+    24	        except ValueError:
+    25	            return 900.0  # 默认 15m
+    26	    val, unit = int(m.group(1)), m.group(2)
+    27	    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    28	    return float(val * mult[unit])
+    29	
+    30	
+    31	def parse_retry_after(retry_after_str: Optional[str], now: Optional[datetime] = None) -> Optional[float]:
+    32	    if not retry_after_str:
+    33	        return None
+    34	    s = retry_after_str.strip()
+    35	    # 1. 秒数格式 (e.g., "120")
+    36	    if s.isdigit():
+    37	        return float(s)
+    38	    # 2. HTTP-Date 格式 (e.g., "Wed, 21 Oct 2026 07:28:00 GMT")
+    39	    try:
+    40	        parsed_dt = email.utils.parsedate_to_datetime(s)
+    41	        if parsed_dt:
+    42	            now_dt = _to_utc_naive(now) or datetime.utcnow()
+    43	            target_dt = _to_utc_naive(parsed_dt)
+    44	            diff = (target_dt - now_dt).total_seconds()
+    45	            return max(0.0, diff)
+    46	    except Exception:
+    47	        pass
+    48	    return None
+    49	
+    50	
+    51	@dataclass
+    52	class FetchDecision:
+    53	    allowed: bool
+    54	    headers: Dict[str, str] = field(default_factory=dict)
+    55	    delay_seconds: float = 0.0
+    56	    reason: Optional[str] = None
+    57	
+    58	
+    59	@dataclass
+    60	class FetchEvaluation:
+    61	    target_id: str
+    62	    status_code: int
+    63	    new_status: TargetStatus
+    64	    should_emit_signal: bool
+    65	    consecutive_failures: int
+    66	    next_allowed_at: Optional[datetime]
+    67	    updated_etag: Optional[str] = None
+    68	    updated_last_modified: Optional[str] = None
+    69	    reason: str = ""
+    70	
+    71	
+    72	class FetchPolicy:
+    73	    """礼貌抓取与韧性决策引擎：协商缓存、退避与状态机流转"""
+    74	
+    75	    def __init__(
+    76	        self,
+    77	        base_backoff_sec: float = 30.0,
+    78	        max_backoff_sec: float = 600.0,
+    79	        max_consecutive_failures: int = 3,
+    80	        cooldown_ladder: Optional[List[float]] = None,
+    81	        jitter_ratio: float = 0.1,
+    82	    ):
+    83	        self.base_backoff_sec = base_backoff_sec
+    84	        self.max_backoff_sec = max_backoff_sec
+    85	        self.max_consecutive_failures = max_consecutive_failures
+    86	        # 冷却阶梯: 30min -> 1h -> 2h -> 4h
+    87	        self.cooldown_ladder = cooldown_ladder or [1800.0, 3600.0, 7200.0, 14400.0]
+    88	        self.jitter_ratio = jitter_ratio
+    89	
+    90	    def prepare_request(self, target: Target, now: Optional[datetime] = None) -> FetchDecision:
+    91	        now_dt = _to_utc_naive(now) or datetime.utcnow()
+    92	        target_next = _to_utc_naive(target.next_allowed_at)
+    93	
+    94	        # 1. 检查是否在冷却或退避保护期内
+    95	        if target_next and now_dt < target_next:
+    96	            remaining = (target_next - now_dt).total_seconds()
+    97	            status_val = target.status.value if hasattr(target.status, "value") else str(target.status)
+    98	            return FetchDecision(
+    99	                allowed=False,
+   100	                delay_seconds=remaining,
+   101	                reason=f"Target '{target.id}' is in {status_val} window ({int(remaining)}s remaining)",
+   102	            )
+   103	
+   104	        # 2. 组装协商缓存头
+   105	        headers: Dict[str, str] = {}
+   106	        if target.etag:
+   107	            headers["If-None-Match"] = target.etag
+   108	        if target.last_modified:
+   109	            headers["If-Modified-Since"] = target.last_modified
+   110	
+   111	        status_val = target.status.value if hasattr(target.status, "value") else str(target.status)
+   112	        return FetchDecision(
+   113	            allowed=True,
+   114	            headers=headers,
+   115	            reason=f"Target '{target.id}' ready for fetch (status: {status_val})",
+   116	        )
+   117	
+   118	    def evaluate_response(
+   119	        self,
+   120	        target: Target,
+   121	        status_code: int,
+   122	        headers: Optional[Dict[str, str]] = None,
+   123	        error: Optional[str] = None,
+   124	        now: Optional[datetime] = None,
+   125	    ) -> FetchEvaluation:
+   126	        now_dt = _to_utc_naive(now) or datetime.utcnow()
+   127	        headers_map = {k.lower(): v for k, v in (headers or {}).items()}
+   128	        interval_sec = parse_interval_seconds(target.interval)
+   129	
+   130	        # A. 304 Not Modified: 协商缓存命中，直接短路
+   131	        if status_code == 304:
+   132	            next_allowed = now_dt + timedelta(seconds=interval_sec)
+   133	            return FetchEvaluation(
+   134	                target_id=target.id,
+   135	                status_code=304,
+   136	                new_status=TargetStatus.NORMAL,
+   137	                should_emit_signal=False,
+   138	                consecutive_failures=0,
+   139	                next_allowed_at=next_allowed,
+   140	                updated_etag=target.etag,
+   141	                updated_last_modified=target.last_modified,
+   142	                reason="304 Not Modified: Cache valid, no change detected",
+   143	            )
+   144	
+   145	        # B. 200-299 Success: 正常抓取成功
+   146	        if 200 <= status_code < 300:
+   147	            res_etag = headers_map.get("etag") or target.etag
+   148	            res_last_mod = headers_map.get("last-modified") or target.last_modified
+   149	            next_allowed = now_dt + timedelta(seconds=interval_sec)
+   150	            return FetchEvaluation(
+   151	                target_id=target.id,
+   152	                status_code=status_code,
+   153	                new_status=TargetStatus.NORMAL,
+   154	                should_emit_signal=True,
+   155	                consecutive_failures=0,
+   156	                next_allowed_at=next_allowed,
+   157	                updated_etag=res_etag,
+   158	                updated_last_modified=res_last_mod,
+   159	                reason=f"HTTP {status_code} Success: Content fetched",
+   160	            )
+   161	
+   162	        # C. 403 Forbidden: 触发风控或权限拒绝，直接进入长周期 COOLDOWN
+   163	        if status_code == 403:
+   164	            failures = target.consecutive_failures + 1
+   165	            cd_sec = self.cooldown_ladder[0]
+   166	            next_allowed = now_dt + timedelta(seconds=cd_sec)
+   167	            return FetchEvaluation(
+   168	                target_id=target.id,
+   169	                status_code=403,
+   170	                new_status=TargetStatus.COOLDOWN,
+   171	                should_emit_signal=False,
+   172	                consecutive_failures=failures,
+   173	                next_allowed_at=next_allowed,
+   174	                reason=f"HTTP 403 Forbidden: Entering cooldown ({int(cd_sec)}s)",
+   175	            )
+   176	
+   177	        # D. 429 Too Many Requests / 5xx Server Error / 网络故障 (status_code == 0)
+   178	        failures = target.consecutive_failures + 1
+   179	        retry_after_sec = parse_retry_after(headers_map.get("retry-after"), now=now_dt)
+   180	
+   181	        # 连续失败达标，或在 RECOVERING/COOLDOWN 状态下探针失败 -> 进入/升级 COOLDOWN
+   182	        if failures >= self.max_consecutive_failures or target.status in (TargetStatus.COOLDOWN, TargetStatus.RECOVERING):
+   183	            ladder_idx = min(max(0, failures - self.max_consecutive_failures), len(self.cooldown_ladder) - 1)
+   184	            cd_sec = self.cooldown_ladder[ladder_idx]
+   185	            next_allowed = now_dt + timedelta(seconds=cd_sec)
+   186	            return FetchEvaluation(
+   187	                target_id=target.id,
+   188	                status_code=status_code,
+   189	                new_status=TargetStatus.COOLDOWN,
+   190	                should_emit_signal=False,
+   191	                consecutive_failures=failures,
+   192	                next_allowed_at=next_allowed,
+   193	                reason=f"Consecutive failures ({failures}) reached threshold: Escalating to cooldown ({int(cd_sec)}s)",
+   194	            )
+   195	
+   196	        # 临时抖动 -> 进入 BACKOFF 指数退避
+   197	        if retry_after_sec is not None:
+   198	            delay = retry_after_sec
+   199	        else:
+   200	            raw_backoff = min(self.base_backoff_sec * (2 ** (failures - 1)), self.max_backoff_sec)
+   201	            jitter = raw_backoff * random.uniform(-self.jitter_ratio, self.jitter_ratio)
+   202	            delay = max(1.0, raw_backoff + jitter)
+   203	
+   204	        next_allowed = now_dt + timedelta(seconds=delay)
+   205	        return FetchEvaluation(
+   206	            target_id=target.id,
+   207	            status_code=status_code,
+   208	            new_status=TargetStatus.BACKOFF,
+   209	            should_emit_signal=False,
+   210	            consecutive_failures=failures,
+   211	            next_allowed_at=next_allowed,
+   212	            reason=f"Temporary failure (HTTP {status_code}): Backing off for {int(delay)}s",
+   213	        )
+
+############################################################
+### FILE: src/web_watcher/dom_extractor.py
+############################################################
+     1	import re
+     2	from typing import Any, Dict, List, Optional
+     3	
+     4	from bs4 import BeautifulSoup
+     5	from web_watcher.rule_models import ExtractorConfig, ExtractionStatus, ExtractionResult
+     6	from web_watcher.transforms import apply_transform
+     7	
+     8	
+     9	class DOMExtractor:
+    10	    """Structured DOM/text extractor with explicit status for selector misses, empty results, and transform failures."""
+    11	
+    12	    @classmethod
+    13	    def extract(cls, html_content: str, config: ExtractorConfig) -> ExtractionResult:
+    14	        meta = {
+    15	            "selector": config.selector,
+    16	            "selector_type": config.selector_type,
+    17	            "match_count": 0,
+    18	        }
+    19	
+    20	        if not html_content:
+    21	            return ExtractionResult(
+    22	                status=ExtractionStatus.SELECTOR_NOT_FOUND,
+    23	                error_message="Empty HTML content provided",
+    24	                metadata=meta,
+    25	            )
+    26	
+    27	        try:
+    28	            if config.selector_type == "raw":
+    29	                meta["match_count"] = 1
+    30	                raw_text = html_content
+    31	                return cls._apply_transforms(raw_text, config, meta)
+    32	
+    33	            elif config.selector_type == "regex":
+    34	                matches = re.findall(config.selector, html_content)
+    35	                meta["match_count"] = len(matches)
+    36	                if not matches:
+    37	                    return ExtractionResult(
+    38	                        status=ExtractionStatus.SELECTOR_NOT_FOUND,
+    39	                        error_message=f"Regex pattern '{config.selector}' matched 0 times",
+    40	                        metadata=meta,
+    41	                    )
+    42	                raw_text = matches[0] if isinstance(matches[0], str) else matches[0][0]
+    43	                return cls._apply_transforms(raw_text, config, meta)
+    44	
+    45	            elif config.selector_type in ("css", "xpath"):
+    46	                soup = BeautifulSoup(html_content, "html.parser")
+    47	                elements = soup.select(config.selector)
+    48	                meta["match_count"] = len(elements)
+    49	
+    50	                if not elements:
+    51	                    return ExtractionResult(
+    52	                        status=ExtractionStatus.SELECTOR_NOT_FOUND,
+    53	                        error_message=f"CSS selector '{config.selector}' found 0 matching elements",
+    54	                        metadata=meta,
+    55	                    )
+    56	
+    57	                raw_text = elements[0].get_text()
+    58	                return cls._apply_transforms(raw_text, config, meta)
+    59	
+    60	            else:
+    61	                return ExtractionResult(
+    62	                    status=ExtractionStatus.TRANSFORM_ERROR,
+    63	                    error_message=f"Unsupported selector_type: '{config.selector_type}'",
+    64	                    metadata=meta,
+    65	                )
+    66	
+    67	        except Exception as e:
+    68	            return ExtractionResult(
+    69	                status=ExtractionStatus.TRANSFORM_ERROR,
+    70	                error_message=f"Extractor internal failure: {str(e)}",
+    71	                metadata=meta,
+    72	            )
+    73	
+    74	    @classmethod
+    75	    def _apply_transforms(cls, raw_text: str, config: ExtractorConfig, meta: Dict[str, Any]) -> ExtractionResult:
+    76	        if not config.transforms:
+    77	            cleaned_val = raw_text.strip()
+    78	            if not cleaned_val and raw_text != "":
+    79	                return ExtractionResult(
+    80	                    status=ExtractionStatus.EMPTY_AFTER_TRANSFORM,
+    81	                    raw_value=raw_text,
+    82	                    value="",
+    83	                    metadata=meta,
+    84	                )
+    85	            return ExtractionResult(
+    86	                status=ExtractionStatus.FOUND,
+    87	                raw_value=raw_text,
+    88	                value=cleaned_val,
+    89	                metadata=meta,
+    90	            )
+    91	
+    92	        try:
+    93	            val = raw_text
+    94	            for t_rule in config.transforms:
+    95	                val = apply_transform(val, t_rule)
+    96	
+    97	            if isinstance(val, str) and val.strip() == "":
+    98	                return ExtractionResult(
+    99	                    status=ExtractionStatus.EMPTY_AFTER_TRANSFORM,
+   100	                    raw_value=raw_text,
+   101	                    value="",
+   102	                    metadata=meta,
+   103	                )
+   104	
+   105	            return ExtractionResult(
+   106	                status=ExtractionStatus.FOUND,
+   107	                raw_value=raw_text,
+   108	                value=val,
+   109	                metadata=meta,
+   110	            )
+   111	        except Exception as e:
+   112	            return ExtractionResult(
+   113	                status=ExtractionStatus.TRANSFORM_ERROR,
+   114	                raw_value=raw_text,
+   115	                value=None,
+   116	                error_message=f"Transform chain failed: {str(e)}",
+   117	                metadata=meta,
+   118	            )
+
+############################################################
+### FILE: src/web_watcher/rule_evaluator.py
+############################################################
+     1	import re
+     2	from dataclasses import dataclass, field
+     3	from typing import Dict, Any, List, Optional
+     4	from web_watcher.rule_models import WatcherRule, TriggerConfig
+     5	from web_watcher.dom_extractor import DOMExtractor
+     6	from web_watcher.rule_models import ExtractionStatus
+     7	
+     8	
+     9	@dataclass
+    10	class TriggeredEvent:
+    11	    rule_id: str
+    12	    trigger_type: str
+    13	    field_name: str
+    14	    old_value: Any
+    15	    new_value: Any
+    16	    importance: str
+    17	    title: str
+    18	    body: str
+    19	    metadata: Dict[str, Any] = field(default_factory=dict)
+    20	
+    21	
+    22	@dataclass
+    23	class EvaluationResult:
+    24	    rule_id: str
+    25	    extracted_values: Dict[str, Any]
+    26	    triggered_events: List[TriggeredEvent]
+    27	    is_triggered: bool
+    28	
+    29	
+    30	class RuleEvaluator:
+    31	    """网页规则评估器：执行 DOM 提取并比对变更触发条件"""
+    32	
+    33	    @classmethod
+    34	    def evaluate_condition(cls, condition: Optional[str], old_val: Any, new_val: Any) -> bool:
+    35	        if not condition:
+    36	            return old_val != new_val
+    37	
+    38	        try:
+    39	            old_num = float(old_val) if old_val is not None else 0.0
+    40	            new_num = float(new_val) if new_val is not None else 0.0
+    41	            delta = new_num - old_num
+    42	            abs_delta = abs(delta)
+    43	            pct_delta = ((new_num - old_num) / old_num * 100.0) if old_num != 0 else 0.0
+    44	
+    45	            context = {
+    46	                "old": old_num,
+    47	                "new": new_num,
+    48	                "delta": delta,
+    49	                "abs_delta": abs_delta,
+    50	                "pct_delta": pct_delta,
+    51	                "abs": abs,
+    52	            }
+    53	            return bool(eval(condition, {"__builtins__": None}, context))
+    54	        except Exception:
+    55	            return str(old_val) != str(new_val)
+    56	
+    57	    @classmethod
+    58	    def render_template(cls, template: Optional[str], context: Dict[str, Any], default: str) -> str:
+    59	        if not template:
+    60	            return default
+    61	        try:
+    62	            return template.format(**context)
+    63	        except Exception:
+    64	            return template
+    65	
+    66	    @classmethod
+    67	    def evaluate(
+    68	        cls,
+    69	        rule: WatcherRule,
+    70	        new_html: str,
+    71	        old_values: Optional[Dict[str, Any]] = None,
+    72	    ) -> EvaluationResult:
+    73	        old_values = old_values or {}
+    74	        extracted: Dict[str, Any] = {}
+    75	
+    76	        # 1. 执行字段提取
+    77	        for ext in rule.extractors:
+    78	            result = DOMExtractor.extract(new_html, ext)
+    79	            if result.status == ExtractionStatus.FOUND:
+    80	                extracted[ext.name] = result.value
+    81	            else:
+    82	                extracted[ext.name] = None
+    83	
+    84	        triggered_events: List[TriggeredEvent] = []
+    85	
+    86	        # 2. 判定触发器
+    87	        for trg in rule.triggers:
+    88	            f_name = trg.field
+    89	            new_val = extracted.get(f_name)
+    90	            old_val = old_values.get(f_name)
+    91	
+    92	            is_trg = False
+    93	            if old_val is not None:
+    94	                if trg.type == "text_diff":
+    95	                    is_trg = str(old_val) != str(new_val)
+    96	                elif trg.type == "numeric_delta":
+    97	                    is_trg = cls.evaluate_condition(trg.condition, old_val, new_val)
+    98	                elif trg.type == "regex_match":
+    99	                    if trg.condition:
+   100	                        is_trg = bool(re.search(trg.condition, str(new_val)))
+   101	                    else:
+   102	                        is_trg = str(old_val) != str(new_val)
+   103	                elif trg.type == "node_changed":
+   104	                    is_trg = old_val != new_val
+   105	                else:
+   106	                    is_trg = old_val != new_val
+   107	
+   108	            if is_trg:
+   109	                delta_num = 0.0
+   110	                pct_num = 0.0
+   111	                try:
+   112	                    if old_val is not None and new_val is not None:
+   113	                        delta_num = float(new_val) - float(old_val)
+   114	                        pct_num = ((delta_num) / float(old_val) * 100.0) if float(old_val) != 0 else 0.0
+   115	                except Exception:
+   116	                    pass
+   117	
+   118	                tmpl_ctx = {
+   119	                    "rule_name": rule.name,
+   120	                    "field": f_name,
+   121	                    "old_value": old_val,
+   122	                    "new_value": new_val,
+   123	                    "delta": delta_num,
+   124	                    "abs_delta": abs(delta_num),
+   125	                    "delta_percent": f"{pct_num:.2f}",
+   126	                    **extracted,
+   127	                }
+   128	
+   129	                title = cls.render_template(
+   130	                    trg.title_template,
+   131	                    tmpl_ctx,
+   132	                    f"[{rule.name}] Field '{f_name}' changed: {old_val} -> {new_val}",
+   133	                )
+   134	                body = cls.render_template(
+   135	                    trg.body_template,
+   136	                    tmpl_ctx,
+   137	                    f"Triggered by {trg.type} on '{f_name}'.\nOld: {old_val}\nNew: {new_val}",
+   138	                )
+   139	
+   140	                triggered_events.append(TriggeredEvent(
+   141	                    rule_id=rule.id,
+   142	                    trigger_type=trg.type,
+   143	                    field_name=f_name,
+   144	                    old_value=old_val,
+   145	                    new_value=new_val,
+   146	                    importance=trg.importance,
+   147	                    title=title,
+   148	                    body=body,
+   149	                    metadata={"rule_name": rule.name, "target_url": rule.target.url},
+   150	                ))
+   151	
+   152	        return EvaluationResult(
+   153	            rule_id=rule.id,
+   154	            extracted_values=extracted,
+   155	            triggered_events=triggered_events,
+   156	            is_triggered=len(triggered_events) > 0,
+   157	        )
+
+############################################################
+### FILE: src/web_watcher/generic_web_target.py
+############################################################
+     1	import hashlib
+     2	import json
+     3	from dataclasses import dataclass, field
+     4	from datetime import datetime
+     5	from typing import Any, Dict, List, Optional
+     6	from web_watcher.models import Target, TargetStatus
+     7	from web_watcher.fetch_policy import FetchPolicy
+     8	from web_watcher.fetcher import SmartFetcher, FetchResult
+     9	from web_watcher.dom_extractor import DOMExtractor
+    10	from web_watcher.rule_models import ExtractorConfig, ExtractionResult
+    11	try:
+    12	    from web_watcher.models import Signal
+    13	except ImportError:
+    14	    Signal = None
+    15	
+    16	
+    17	@dataclass
+    18	class TargetExecutionResult:
+    19	    target_id: str
+    20	    allowed: bool
+    21	    status_code: Optional[int]
+    22	    new_status: TargetStatus
+    23	    signals_emitted: List[Any]
+    24	    extracted_results: Dict[str, ExtractionResult]
+    25	    extracted_values: Dict[str, Any]
+    26	    is_304: bool = False
+    27	    has_extraction_failures: bool = False
+    28	    reason: str = ""
+    29	
+    30	
+    31	class GenericWebTarget:
+    32	    """General-purpose web target adapter with polite fetch, cache handling, extraction, and false-positive guards."""
+    33	
+    34	    def __init__(
+    35	        self,
+    36	        target: Target,
+    37	        extractors: Optional[List[ExtractorConfig]] = None,
+    38	        custom_headers: Optional[Dict[str, str]] = None,
+    39	        timeout: float = 10.0,
+    40	    ):
+    41	        self.target = target
+    42	        self.extractors = extractors or []
+    43	        self.custom_headers = custom_headers or {}
+    44	        self.timeout = timeout
+    45	
+    46	    def execute(
+    47	        self,
+    48	        fetcher: Optional[SmartFetcher] = None,
+    49	        policy: Optional[FetchPolicy] = None,
+    50	        repo: Optional[Any] = None,
+    51	        now: Optional[datetime] = None,
+    52	    ) -> TargetExecutionResult:
+    53	        now = now or datetime.utcnow()
+    54	        fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
+    55	        policy = policy or FetchPolicy()
+    56	
+    57	        # 1. Policy pre-check
+    58	        decision = policy.prepare_request(self.target, now=now)
+    59	        if not decision.allowed:
+    60	            return TargetExecutionResult(
+    61	                target_id=self.target.id,
+    62	                allowed=False,
+    63	                status_code=None,
+    64	                new_status=self.target.status,
+    65	                signals_emitted=[],
+    66	                extracted_results={},
+    67	                extracted_values={},
+    68	                reason=decision.reason or "Execution skipped by policy",
+    69	            )
+    70	
+    71	        # 2. Fetch
+    72	        headers_to_send = dict(self.custom_headers)
+    73	        headers_to_send.update(decision.headers)
+    74	
+    75	        fetch_res: FetchResult = fetcher.fetch(
+    76	            url=self.target.url,
+    77	            custom_headers=headers_to_send,
+    78	            etag=self.target.etag,
+    79	            last_modified=self.target.last_modified,
+    80	            timeout=self.timeout,
+    81	        )
+    82	
+    83	        # 3. Policy post-evaluation
+    84	        headers_dict = {}
+    85	        if fetch_res.etag:
+    86	            headers_dict["etag"] = fetch_res.etag
+    87	        if fetch_res.last_modified:
+    88	            headers_dict["last-modified"] = fetch_res.last_modified
+    89	
+    90	        evaluation = policy.evaluate_response(
+    91	            target=self.target,
+    92	            status_code=fetch_res.status_code,
+    93	            headers=headers_dict,
+    94	            error=fetch_res.error,
+    95	            now=now,
+    96	        )
+    97	
+    98	        # 4. Update target state machine
+    99	        self.target.status = evaluation.new_status
+   100	        self.target.etag = evaluation.updated_etag
+   101	        self.target.last_modified = evaluation.updated_last_modified
+   102	        self.target.consecutive_failures = evaluation.consecutive_failures
+   103	        self.target.next_allowed_at = evaluation.next_allowed_at
+   104	        self.target.last_fetched_at = now
+   105	
+   106	        # 5. 304 short circuit
+   107	        if evaluation.status_code == 304 or fetch_res.is_304_not_modified:
+   108	            if repo and hasattr(repo, "save_target"):
+   109	                repo.save_target(self.target)
+   110	            return TargetExecutionResult(
+   111	                target_id=self.target.id,
+   112	                allowed=True,
+   113	                status_code=304,
+   114	                new_status=self.target.status,
+   115	                signals_emitted=[],
+   116	                extracted_results={},
+   117	                extracted_values={},
+   118	                is_304=True,
+   119	                reason=evaluation.reason,
+   120	            )
+   121	
+   122	        # 6. Non-success status: persist and return
+   123	        if not evaluation.should_emit_signal:
+   124	            if repo and hasattr(repo, "save_target"):
+   125	                repo.save_target(self.target)
+   126	            return TargetExecutionResult(
+   127	                target_id=self.target.id,
+   128	                allowed=True,
+   129	                status_code=evaluation.status_code,
+   130	                new_status=self.target.status,
+   131	                signals_emitted=[],
+   132	                extracted_results={},
+   133	                extracted_values={},
+   134	                reason=evaluation.reason,
+   135	            )
+   136	
+   137	        # 7. Successful fetch: extract fields
+   138	        extracted_results: Dict[str, ExtractionResult] = {}
+   139	        extracted_values: Dict[str, Any] = {}
+   140	        has_failures = False
+   141	
+   142	        for ext in self.extractors:
+   143	            result = DOMExtractor.extract(fetch_res.content, ext)
+   144	            extracted_results[ext.name] = result
+   145	            if not result.is_found:
+   146	                has_failures = True
+   147	            else:
+   148	                extracted_values[ext.name] = result.value
+   149	
+   150	        # 8. Content-hash change detection with false-positive guards
+   151	        new_hash = hashlib.sha256(fetch_res.content.encode("utf-8")).hexdigest()
+   152	        prev_hash = self.target.content_hash
+   153	        should_emit = False
+   154	        emit_reason = "Content identical, no signal emitted"
+   155	
+   156	        if prev_hash is None or not self.target.metadata.get("initialized"):
+   157	            should_emit = True
+   158	            emit_reason = "Initial fetch"
+   159	        elif prev_hash != new_hash:
+   160	            # Content changed; if configured extractors all failed to match, suppress as a likely false positive
+   161	            if self.extractors and all(not extracted_results[e.name].is_found for e in self.extractors):
+   162	                should_emit = False
+   163	                emit_reason = "Content changed but all configured extractors failed; suppressing as potential false positive"
+   164	            else:
+   165	                should_emit = True
+   166	                emit_reason = "Content changed with at least one successful extraction"
+   167	        else:
+   168	            should_emit = False
+   169	            emit_reason = "Content identical, no signal emitted"
+   170	
+   171	        signals: List[Any] = []
+   172	        if should_emit:
+   173	            self.target.content_hash = new_hash
+   174	            self.target.metadata["initialized"] = True
+   175	            self.target.metadata["last_extracted"] = {k: v.value for k, v in extracted_results.items() if v.is_found}
+   176	
+   177	            payload = {
+   178	                "target_id": self.target.id,
+   179	                "url": self.target.url,
+   180	                "extracted_values": extracted_values,
+   181	                "extraction_results": {k: {"status": v.status.value, "value": v.value} for k, v in extracted_results.items()},
+   182	                "content_hash": new_hash,
+   183	                "previous_hash": prev_hash,
+   184	                "status_code": fetch_res.status_code,
+   185	                "captured_at": now.isoformat(),
+   186	            }
+   187	
+   188	            sig_obj = None
+   189	            if Signal is not None:
+   190	                try:
+   191	                    sig_obj = Signal(
+   192	                        id=f"sig_{self.target.id}_{int(now.timestamp())}",
+   193	                        entity_id=self.target.id,
+   194	                        signal_type="WEB_CONTENT_CHANGED",
+   195	                        payload=payload,
+   196	                        created_at=now,
+   197	                    )
+   198	                except Exception:
+   199	                    try:
+   200	                        sig_obj = Signal(
+   201	                            entity_id=self.target.id,
+   202	                            signal_type="WEB_CONTENT_CHANGED",
+   203	                            payload=payload,
+   204	                        )
+   205	                    except Exception:
+   206	                        sig_obj = payload
+   207	            else:
+   208	                sig_obj = payload
+   209	
+   210	            signals.append(sig_obj)
+   211	            if repo and hasattr(repo, "save_signal") and sig_obj is not None:
+   212	                try:
+   213	                    repo.save_signal(sig_obj)
+   214	                except Exception:
+   215	                    pass
+   216	
+   217	        # 9. Persist latest target state
+   218	        if repo and hasattr(repo, "save_target"):
+   219	            repo.save_target(self.target)
+   220	
+   221	        return TargetExecutionResult(
+   222	            target_id=self.target.id,
+   223	            allowed=True,
+   224	            status_code=fetch_res.status_code,
+   225	            new_status=self.target.status,
+   226	            signals_emitted=signals,
+   227	            extracted_results=extracted_results,
+   228	            extracted_values=extracted_values,
+   229	            is_304=False,
+   230	            has_extraction_failures=has_failures,
+   231	            reason=emit_reason,
+   232	        )
+
+############################################################
+### FILE: src/web_watcher/github_target.py
+############################################################
+     1	import os
+     2	import re
+     3	import json
+     4	from dataclasses import dataclass, field
+     5	from datetime import datetime
+     6	from typing import Optional, Dict, Any, List, Tuple
+     7	from web_watcher.models import Target, TargetStatus
+     8	from web_watcher.fetch_policy import FetchPolicy, FetchDecision, FetchEvaluation
+     9	from web_watcher.fetcher import SmartFetcher, FetchResult
+    10	try:
+    11	    from web_watcher.models import Signal
+    12	except ImportError:
+    13	    Signal = None
+    14	
+    15	
+    16	def parse_github_repo(url_or_slug: str) -> Tuple[str, str]:
+    17	    """从 URL 或 slug 中解析 owner 与 repo 名称"""
+    18	    s = url_or_slug.strip().rstrip("/")
+    19	    m = re.search(r"(?:github\.com/|api\.github\.com/repos/)?([^/]+)/([^/]+?)(?:\.git|/)?$", s)
+    20	    if m:
+    21	        return m.group(1), m.group(2)
+    22	    raise ValueError(f"Invalid GitHub repository identifier: '{url_or_slug}'")
+    23	
+    24	
+    25	@dataclass
+    26	class GitHubTargetExecutionResult:
+    27	    target_id: str
+    28	    allowed: bool
+    29	    status_code: Optional[int]
+    30	    new_status: TargetStatus
+    31	    signals_emitted: List[Any]
+    32	    is_304: bool = False
+    33	    rate_limit_remaining: Optional[int] = None
+    34	    reason: str = ""
+    35	
+    36	
+    37	class GitHubTarget:
+    38	    """GitHub 官方 REST API 专有监控适配器：Releases / Tags / Stars 语义化信号生成与 ETag 缓存"""
+    39	
+    40	    BASE_API = "https://api.github.com"
+    41	
+    42	    def __init__(
+    43	        self,
+    44	        target: Target,
+    45	        watch_types: Optional[List[str]] = None,
+    46	        token: Optional[str] = None,
+    47	        star_delta_threshold: int = 1,
+    48	        timeout: float = 10.0,
+    49	    ):
+    50	        self.target = target
+    51	        self.owner, self.repo_name = parse_github_repo(target.url)
+    52	        self.watch_types = set(watch_types or ["releases", "stars", "tags"])
+    53	        self.token = token or os.getenv("GITHUB_TOKEN")
+    54	        self.star_delta_threshold = max(1, star_delta_threshold)
+    55	        self.timeout = timeout
+    56	
+    57	    def _build_headers(self, etag: Optional[str] = None) -> Dict[str, str]:
+    58	        headers = {
+    59	            "Accept": "application/vnd.github+json",
+    60	            "User-Agent": "web-watcher/1.0",
+    61	            "X-GitHub-Api-Version": "2022-11-28",
+    62	        }
+    63	        if self.token:
+    64	            headers["Authorization"] = f"Bearer {self.token}"
+    65	        if etag:
+    66	            headers["If-None-Match"] = etag
+    67	        return headers
+    68	
+    69	    def _create_signal(self, signal_type: str, payload: Dict[str, Any], now: datetime) -> Any:
+    70	        if Signal is not None:
+    71	            try:
+    72	                return Signal(
+    73	                    id=f"sig_{self.target.id}_{signal_type.lower()}_{int(now.timestamp())}",
+    74	                    entity_id=self.target.id,
+    75	                    signal_type=signal_type,
+    76	                    payload=payload,
+    77	                    created_at=now,
+    78	                )
+    79	            except Exception:
+    80	                try:
+    81	                    return Signal(
+    82	                        entity_id=self.target.id,
+    83	                        signal_type=signal_type,
+    84	                        payload=payload,
+    85	                    )
+    86	                except Exception:
+    87	                    return payload
+    88	        return payload
+    89	
+    90	    def execute(
+    91	        self,
+    92	        fetcher: Optional[SmartFetcher] = None,
+    93	        policy: Optional[FetchPolicy] = None,
+    94	        repo: Optional[Any] = None,
+    95	        now: Optional[datetime] = None,
+    96	    ) -> GitHubTargetExecutionResult:
+    97	        now = now or datetime.utcnow()
+    98	        fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
+    99	        policy = policy or FetchPolicy()
+   100	
+   101	        # 1. 策略前置检查
+   102	        decision = policy.prepare_request(self.target, now=now)
+   103	        if not decision.allowed:
+   104	            return GitHubTargetExecutionResult(
+   105	                target_id=self.target.id,
+   106	                allowed=False,
+   107	                status_code=None,
+   108	                new_status=self.target.status,
+   109	                signals_emitted=[],
+   110	                reason=decision.reason or "Skipped by policy",
+   111	            )
+   112	
+   113	        meta = dict(self.target.metadata or {})
+   114	        signals: List[Any] = []
+   115	        is_any_304 = False
+   116	        last_status_code = 200
+   117	
+   118	        # 2. 检查 Releases
+   119	        if "releases" in self.watch_types:
+   120	            rel_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/releases/latest"
+   121	            rel_etag = meta.get("release_etag")
+   122	            res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
+   123	
+   124	            eval_res = policy.evaluate_response(self.target, res.status_code, error=res.error, now=now)
+   125	            self.target.status = eval_res.new_status
+   126	
+   127	            if res.status_code == 304 or res.is_304_not_modified:
+   128	                is_any_304 = True
+   129	            elif res.status_code == 200 and res.content:
+   130	                try:
+   131	                    rel_data = json.loads(res.content)
+   132	                    tag_name = rel_data.get("tag_name")
+   133	                    prev_tag = meta.get("last_release_tag")
+   134	
+   135	                    meta["release_etag"] = res.etag
+   136	                    meta["last_release_tag"] = tag_name
+   137	
+   138	                    if prev_tag is not None and prev_tag != tag_name:
+   139	                        sig = self._create_signal(
+   140	                            "GITHUB_RELEASE_PUBLISHED",
+   141	                            {
+   142	                                "owner": self.owner,
+   143	                                "repo": self.repo_name,
+   144	                                "tag_name": tag_name,
+   145	                                "release_name": rel_data.get("name"),
+   146	                                "html_url": rel_data.get("html_url"),
+   147	                                "published_at": rel_data.get("published_at"),
+   148	                                "body": rel_data.get("body", "")[:500],
+   149	                            },
+   150	                            now,
+   151	                        )
+   152	                        signals.append(sig)
+   153	                except Exception:
+   154	                    pass
+   155	            last_status_code = res.status_code
+   156	
+   157	        # 3. 检查 Repo Meta (Stars)
+   158	        if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL:
+   159	            repo_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}"
+   160	            repo_etag = meta.get("repo_etag")
+   161	            res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
+   162	
+   163	            if res.status_code == 200 and res.content:
+   164	                try:
+   165	                    repo_data = json.loads(res.content)
+   166	                    stars = repo_data.get("stargazers_count", 0)
+   167	                    prev_stars = meta.get("last_stars")
+   168	
+   169	                    meta["repo_etag"] = res.etag
+   170	                    meta["last_stars"] = stars
+   171	
+   172	                    if prev_stars is not None:
+   173	                        delta = stars - prev_stars
+   174	                        if abs(delta) >= self.star_delta_threshold:
+   175	                            sig = self._create_signal(
+   176	                                "GITHUB_STARS_CHANGED",
+   177	                                {
+   178	                                    "owner": self.owner,
+   179	                                    "repo": self.repo_name,
+   180	                                    "old_stars": prev_stars,
+   181	                                    "new_stars": stars,
+   182	                                    "delta": delta,
+   183	                                },
+   184	                                now,
+   185	                            )
+   186	                            signals.append(sig)
+   187	                except Exception:
+   188	                    pass
+   189	            elif res.status_code == 304 or res.is_304_not_modified:
+   190	                is_any_304 = True
+   191	            last_status_code = res.status_code
+   192	
+   193	        # 4. 同步更新状态与元数据
+   194	        self.target.metadata = meta
+   195	        self.target.last_fetched_at = now
+   196	        if repo and hasattr(repo, "save_target"):
+   197	            repo.save_target(self.target)
+   198	
+   199	        # 5. 持久化 signals
+   200	        if repo and hasattr(repo, "save_signal"):
+   201	            for s in signals:
+   202	                try:
+   203	                    repo.save_signal(s)
+   204	                except Exception:
+   205	                    pass
+   206	
+   207	        return GitHubTargetExecutionResult(
+   208	            target_id=self.target.id,
+   209	            allowed=True,
+   210	            status_code=last_status_code,
+   211	            new_status=self.target.status,
+   212	            signals_emitted=signals,
+   213	            is_304=is_any_304 and len(signals) == 0,
+   214	            reason=f"Emitted {len(signals)} GitHub signals" if signals else "No new events",
+   215	        )
+
+############################################################
+### FILE: src/web_watcher/event_correlator.py
+############################################################
+     1	"""Event Correlator: aggregates signals into domain events and manages auto-investigation dispatch (Phase 11-B)."""
+     2	
+     3	from dataclasses import dataclass, field
+     4	from datetime import datetime, timedelta, timezone
+     5	import logging
+     6	from typing import Any, Dict, List, Optional
+     7	
+     8	from .event_status import EventStatus
+     9	from .event_types import EventType
+    10	from .importance import Importance
+    11	from .investigation_adapter import EventInvestigationAdapter
+    12	from .models import Entity, Event, Signal
+    13	from .repository import Repository
+    14	from .signal_types import SignalType
+    15	
+    16	logger = logging.getLogger(__name__)
+    17	
+    18	
+    19	@dataclass
+    20	class CorrelationConfig:
+    21	    """Correlation tuning knobs for the correlator."""
+    22	
+    23	    correlation_window_seconds: int = 24 * 3600
+    24	    default_importance: str = "medium"
+    25	
+    26	    def __post_init__(self):
+    27	        if self.correlation_window_seconds <= 0:
+    28	            raise ValueError("correlation_window_seconds must be > 0")
+    29	
+    30	    @property
+    31	    def window(self) -> timedelta:
+    32	        return timedelta(seconds=self.correlation_window_seconds)
+    33	
+    34	
+    35	def _derive_event_type(signal: Signal) -> str:
+    36	    """Backward-compatible helper that returns the event type string."""
+    37	    correlator = EventCorrelator(repository=None)
+    38	    resolved = correlator._resolve_event_type(signal)
+    39	    return resolved.value if hasattr(resolved, "value") else str(resolved)
+    40	
+    41	
+    42	class EventCorrelator:
+    43	    """Correlates incoming signals into domain events and optionally triggers investigations."""
+    44	
+    45	    def __init__(
+    46	        self,
+    47	        repository: Repository,
+    48	        auto_investigate: bool = False,
+    49	        investigation_adapter: Optional[EventInvestigationAdapter] = None,
+    50	        planner: Optional[Any] = None,
+    51	        engine: Optional[Any] = None,
+    52	        config: Optional[CorrelationConfig] = None,
+    53	        now_factory: Optional[Any] = None,
+    54	    ):
+    55	        self.repository = repository
+    56	        self.auto_investigate = auto_investigate
+    57	        self.config = config or CorrelationConfig()
+    58	        self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+    59	        self.investigation_adapter = investigation_adapter or (
+    60	            EventInvestigationAdapter() if auto_investigate else None
+    61	        )
+    62	        self.planner = planner
+    63	        self.engine = engine
+    64	
+    65	    def _resolve_event_type(self, signal: Signal) -> EventType:
+    66	        sig_type = signal.signal_type
+    67	        if sig_type == SignalType.STARS_CHANGED:
+    68	            return EventType.STARS_CHANGED
+    69	        if sig_type == SignalType.RELEASE_PUBLISHED:
+    70	            return EventType.RELEASE_PUBLISHED
+    71	        return EventType.CONTENT_CHANGE
+    72	
+    73	    def _evaluate_importance(self, signal: Signal, existing_event: Optional[Event] = None) -> Importance:
+    74	        sig_type = signal.signal_type
+    75	        if sig_type == SignalType.RELEASE_PUBLISHED:
+    76	            return Importance.CRITICAL
+    77	        if sig_type == SignalType.CONTENT_CHANGE:
+    78	            return Importance.IMPORTANT
+    79	        return Importance.INTERESTING
+    80	
+    81	    def process_signal(self, signal: Signal) -> Event:
+    82	        """Processes an incoming signal, correlates it into an event, and triggers auto-investigation if enabled."""
+    83	        entity_id = signal.entity_id
+    84	        resolved_type = self._resolve_event_type(signal)
+    85	        now = self.now_factory()
+    86	        cutoff = now - self.config.window
+    87	        open_event = self.repository.find_open_event_for_entity(
+    88	            entity_id,
+    89	            event_type=resolved_type,
+    90	            cutoff=cutoff,
+    91	        )
+    92	
+    93	        importance = self._evaluate_importance(signal, open_event)
+    94	
+    95	        if open_event is None:
+    96	            event = self.repository.create_event(
+    97	                entity_id=entity_id,
+    98	                event_type=resolved_type,
+    99	                status=EventStatus.OPEN,
+   100	                importance=importance,
+   101	                created_at=signal.observed_at,
+   102	            )
+   103	        else:
+   104	            event = open_event
+   105	            if (
+   106	                importance == Importance.CRITICAL
+   107	                or (importance == Importance.IMPORTANT and event.importance == Importance.INTERESTING)
+   108	            ):
+   109	                self.repository.update_event(event.id, importance=importance)
+   110	                refreshed = self.repository.get_event(event.id)
+   111	                if refreshed:
+   112	                    event = refreshed
+   113	
+   114	        persisted_signal = self._persist_signal_if_needed(signal)
+   115	        if persisted_signal is not None:
+   116	            signal = persisted_signal
+   117	
+   118	        if signal.id is not None:
+   119	            self.repository.link_signal_to_event(event.id, signal.id)
+   120	
+   121	        if self.auto_investigate:
+   122	            self.dispatch_investigation(event)
+   123	
+   124	        return event
+   125	
+   126	    def _persist_signal_if_needed(self, signal: Signal) -> Optional[Signal]:
+   127	        if signal.id is None:
+   128	            return None
+   129	        existing = self.repository.connection.execute(
+   130	            "SELECT id FROM signals WHERE id = ?", (signal.id,)
+   131	        ).fetchone()
+   132	        if existing:
+   133	            return signal
+   134	        return self.repository.create_signal(
+   135	            entity_id=signal.entity_id,
+   136	            signal_type=signal.signal_type,
+   137	            observed_at=signal.observed_at,
+   138	            value=signal.value,
+   139	            fingerprint=signal.fingerprint,
+   140	        )
+   141	
+   142	    def correlate(self, signal: Signal) -> Event:
+   143	        """Alias for process_signal to maintain backward compatibility."""
+   144	        return self.process_signal(signal)
+   145	
+   146	    def close_event(self, event_id: int) -> None:
+   147	        """Close an existing event so it no longer accepts new signals."""
+   148	        self.repository.update_event(event_id=event_id, status=EventStatus.CLOSED)
+   149	
+   150	    def dispatch_investigation(self, event: Event) -> bool:
+   151	        """Dispatches automatic investigation for an event if eligible and not previously investigated."""
+   152	        adapter = self.investigation_adapter or EventInvestigationAdapter()
+   153	        if not adapter.is_eligible(event):
+   154	            return False
+   155	
+   156	        existing = self.repository.get_investigation_result_by_event(event.id)
+   157	        if existing is not None:
+   158	            return False
+   159	
+   160	        try:
+   161	            task_type = adapter.resolve_task_type(event)
+   162	            task_type_str = task_type.value if hasattr(task_type, "value") else str(task_type)
+   163	
+   164	            result = adapter.run_for_event(
+   165	                event,
+   166	                planner=self.planner,
+   167	                engine=self.engine,
+   168	            )
+   169	            if result is None:
+   170	                return False
+   171	
+   172	            summary = getattr(result, "summary", None) or f"Auto-investigation completed for event {event.id}"
+   173	            metadata = getattr(result, "metadata", {}) or {}
+   174	            raw_evidence = getattr(result, "evidence", []) or []
+   175	
+   176	            evidence_items = []
+   177	            for item in raw_evidence:
+   178	                if isinstance(item, dict):
+   179	                    evidence_items.append(item)
+   180	                else:
+   181	                    evidence_items.append({
+   182	                        "evidence_type": getattr(item, "evidence_type", "generic"),
+   183	                        "payload": getattr(item, "payload", {}),
+   184	                    })
+   185	
+   186	            inv_id = f"inv_auto_{event.id}"
+   187	            status_val = "completed"
+   188	            if hasattr(result, "status"):
+   189	                status_val = result.status.value if hasattr(result.status, "value") else str(result.status)
+   190	
+   191	            self.repository.save_investigation_result(
+   192	                investigation_id=inv_id,
+   193	                event_id=event.id,
+   194	                task_type=task_type_str,
+   195	                status=status_val,
+   196	                summary=summary,
+   197	                metadata=metadata,
+   198	                evidence_items=evidence_items,
+   199	            )
+   200	            return True
+   201	        except Exception as exc:
+   202	            logger.error(f"Auto investigation dispatch failed for event {event.id}: {exc}", exc_info=True)
+   203	            return False
+
+############################################################
+### FILE: tests/test_fetch_contract.py
+############################################################
+     1	"""Tests for FetchRequest, FetchResult, Fetcher, SourceAdapter, and select_adapter."""
+     2	
+     3	from datetime import datetime, timezone
+     4	
+     5	import pytest
+     6	
+     7	from web_watcher.fetch import (
+     8	    FetchRequest,
+     9	    FetchResult,
+    10	    Fetcher,
+    11	    SourceAdapter,
+    12	    select_adapter,
+    13	)
+    14	from web_watcher.targets import WatchTarget
+    15	
+    16	
+    17	def _now() -> datetime:
+    18	    return datetime(2026, 1, 1, tzinfo=timezone.utc)
+    19	
+    20	
+    21	def _mk_target(**overrides):
+    22	    defaults = {
+    23	        "key": "github:example/project",
+    24	        "target_type": "github_repository",
+    25	        "name": "Example Project",
+    26	        "locator": "example/project",
+    27	    }
+    28	    defaults.update(overrides)
+    29	    return WatchTarget(**defaults)
+    30	
+    31	
+    32	# ---------------------------------------------------------------------------
+    33	# FetchRequest
+    34	# ---------------------------------------------------------------------------
+    35	
+    36	
+    37	class TestFetchRequest:
+    38	
+    39	    def test_minimal_request(self):
+    40	        target = _mk_target()
+    41	        req = FetchRequest(target=target)
+    42	        assert req.target is target
+    43	        assert req.etag is None
+    44	        assert req.last_modified is None
+    45	
+    46	    def test_request_with_etag_and_last_modified(self):
+    47	        req = FetchRequest(
+    48	            target=_mk_target(),
+    49	            etag="abc123",
+    50	            last_modified="Wed, 01 Jan 2026 00:00:00 GMT",
+    51	        )
+    52	        assert req.etag == "abc123"
+    53	        assert req.last_modified.startswith("Wed")
+    54	
+    55	    def test_request_is_frozen(self):
+    56	        req = FetchRequest(target=_mk_target())
+    57	        with pytest.raises(Exception):
+    58	            req.target = _mk_target(key="other")
+    59	
+    60	
+    61	# ---------------------------------------------------------------------------
+    62	# FetchResult
+    63	# ---------------------------------------------------------------------------
+    64	
+    65	
+    66	class TestFetchResult:
+    67	
+    68	    def test_success_result_minimal(self):
+    69	        result = FetchResult(
+    70	            target_key="github:example/project",
+    71	            success=True,
+    72	            status_code=200,
+    73	            fetched_at=_now(),
+    74	        )
+    75	        assert result.success is True
+    76	        assert result.status_code == 200
+    77	        assert result.error is None
+    78	
+    79	    def test_success_result_with_content(self):
+    80	        result = FetchResult(
+    81	            target_key="k",
+    82	            success=True,
+    83	            status_code=200,
+    84	            fetched_at=_now(),
+    85	            content="<html></html>",
+    86	            content_type="text/html",
+    87	        )
+    88	        assert result.content == "<html></html>"
+    89	        assert result.content_type == "text/html"
+    90	
+    91	    def test_failure_result(self):
+    92	        result = FetchResult(
+    93	            target_key="k",
+    94	            success=False,
+    95	            status_code=404,
+    96	            fetched_at=_now(),
+    97	            error="not found",
+    98	        )
+    99	        assert result.success is False
+   100	        assert result.error == "not found"
+   101	        assert result.status_code == 404
+   102	
+   103	    def test_result_with_etag_and_last_modified(self):
+   104	        result = FetchResult(
+   105	            target_key="k",
+   106	            success=True,
+   107	            status_code=304,
+   108	            fetched_at=_now(),
+   109	            etag="new-etag",
+   110	            last_modified="Wed, 02 Jan 2026 00:00:00 GMT",
+   111	        )
+   112	        assert result.etag == "new-etag"
+   113	        assert result.last_modified.startswith("Wed")
+   114	
+   115	    def test_result_with_content_hash(self):
+   116	        result = FetchResult(
+   117	            target_key="k",
+   118	            success=True,
+   119	            status_code=200,
+   120	            fetched_at=_now(),
+   121	            content_hash="sha256:abc",
+   122	        )
+   123	        assert result.content_hash == "sha256:abc"
+   124	
+   125	    def test_result_metadata_default_empty(self):
+   126	        result = FetchResult(
+   127	            target_key="k",
+   128	            success=True,
+   129	            status_code=200,
+   130	            fetched_at=_now(),
+   131	        )
+   132	        assert result.metadata == {}
+   133	
+   134	    def test_result_metadata_custom(self):
+   135	        result = FetchResult(
+   136	            target_key="k",
+   137	            success=True,
+   138	            status_code=200,
+   139	            fetched_at=_now(),
+   140	            metadata={"source": "test"},
+   141	        )
+   142	        assert result.metadata["source"] == "test"
+   143	
+   144	    def test_result_is_frozen(self):
+   145	        result = FetchResult(
+   146	            target_key="k",
+   147	            success=True,
+   148	            status_code=200,
+   149	            fetched_at=_now(),
+   150	        )
+   151	        with pytest.raises(Exception):
+   152	            result.success = False
+   153	
+   154	
+   155	# ---------------------------------------------------------------------------
+   156	# select_adapter
+   157	# ---------------------------------------------------------------------------
+   158	
+   159	
+   160	class _GitHubAdapter:
+   161	    def supports(self, target):
+   162	        return target.target_type == "github_repository"
+   163	
+   164	    def fetch(self, request):
+   165	        raise NotImplementedError
+   166	
+   167	
+   168	class _WebsiteAdapter:
+   169	    def supports(self, target):
+   170	        return target.target_type == "official_website"
+   171	
+   172	    def fetch(self, request):
+   173	        raise NotImplementedError
+   174	
+   175	
+   176	class _NewsAdapter:
+   177	    def supports(self, target):
+   178	        return target.target_type == "news_source"
+   179	
+   180	    def fetch(self, request):
+   181	        raise NotImplementedError
+   182	
+   183	
+   184	class _WildcardAdapter:
+   185	    """Matches everything — used to test ambiguity detection."""
+   186	
+   187	    def supports(self, target):
+   188	        return True
+   189	
+   190	    def fetch(self, request):
+   191	        raise NotImplementedError
+   192	
+   193	
+   194	class TestSelectAdapter:
+   195	
+   196	    def test_selects_github_adapter(self):
+   197	        adapters: list[SourceAdapter] = [
+   198	            _GitHubAdapter(), _WebsiteAdapter(), _NewsAdapter()
+   199	        ]
+   200	        adapter = select_adapter(_mk_target(), adapters)
+   201	        assert isinstance(adapter, _GitHubAdapter)
+   202	
+   203	    def test_selects_website_adapter(self):
+   204	        adapters: list[SourceAdapter] = [
+   205	            _GitHubAdapter(), _WebsiteAdapter(), _NewsAdapter()
+   206	        ]
+   207	        adapter = select_adapter(
+   208	            _mk_target(
+   209	                target_type="official_website",
+   210	                locator="https://example.com",
+   211	            ),
+   212	            adapters,
+   213	        )
+   214	        assert isinstance(adapter, _WebsiteAdapter)
+   215	
+   216	    def test_selects_news_adapter(self):
+   217	        adapters: list[SourceAdapter] = [
+   218	            _GitHubAdapter(), _WebsiteAdapter(), _NewsAdapter()
+   219	        ]
+   220	        adapter = select_adapter(
+   221	            _mk_target(
+   222	                target_type="news_source",
+   223	                locator="https://example.com/feed",
+   224	            ),
+   225	            adapters,
+   226	        )
+   227	        assert isinstance(adapter, _NewsAdapter)
+   228	
+   229	    def test_raises_when_no_match(self):
+   230	        adapters: list[SourceAdapter] = [_WebsiteAdapter()]
+   231	        with pytest.raises(LookupError, match="no adapter available"):
+   232	            select_adapter(_mk_target(), adapters)
+   233	
+   234	    def test_raises_when_multiple_match(self):
+   235	        adapters: list[SourceAdapter] = [
+   236	            _GitHubAdapter(), _WildcardAdapter()
+   237	        ]
+   238	        with pytest.raises(LookupError, match="multiple adapters"):
+   239	            select_adapter(_mk_target(), adapters)
+   240	
+   241	    def test_empty_adapter_list_raises(self):
+   242	        with pytest.raises(LookupError):
+   243	            select_adapter(_mk_target(), [])
+
+############################################################
+### FILE: tests/test_fetch_policy.py
+############################################################
+     1	from datetime import datetime, timedelta
+     2	from web_watcher.models import Target, TargetStatus
+     3	from web_watcher.fetch_policy import (
+     4	    FetchPolicy,
+     5	    parse_retry_after,
+     6	    parse_interval_seconds,
+     7	)
+     8	
+     9	
+    10	def test_parse_interval_seconds():
+    11	    assert parse_interval_seconds("30s") == 30.0
+    12	    assert parse_interval_seconds("15m") == 900.0
+    13	    assert parse_interval_seconds("2h") == 7200.0
+    14	    assert parse_interval_seconds("1d") == 86400.0
+    15	    assert parse_interval_seconds("invalid") == 900.0
+    16	
+    17	
+    18	def test_parse_retry_after():
+    19	    assert parse_retry_after("120") == 120.0
+    20	    assert parse_retry_after(None) is None
+    21	
+    22	    # HTTP-Date 格式
+    23	    now = datetime(2026, 8, 18, 10, 0, 0)
+    24	    future_date = "Tue, 18 Aug 2026 10:05:00 GMT"
+    25	    diff = parse_retry_after(future_date, now=now)
+    26	    assert diff is not None
+    27	    assert abs(diff - 300.0) < 2.0
+    28	
+    29	
+    30	def test_prepare_request_injects_caching_headers():
+    31	    policy = FetchPolicy()
+    32	    t = Target(
+    33	        id="t1",
+    34	        url="https://example.com",
+    35	        etag='"etag-12345"',
+    36	        last_modified="Wed, 21 Oct 2025 07:28:00 GMT",
+    37	    )
+    38	    decision = policy.prepare_request(t)
+    39	
+    40	    assert decision.allowed is True
+    41	    assert decision.headers["If-None-Match"] == '"etag-12345"'
+    42	    assert decision.headers["If-Modified-Since"] == "Wed, 21 Oct 2025 07:28:00 GMT"
+    43	
+    44	
+    45	def test_prepare_request_blocks_if_not_yet_allowed():
+    46	    policy = FetchPolicy()
+    47	    now = datetime.utcnow()
+    48	    t = Target(
+    49	        id="t2",
+    50	        url="https://example.com",
+    51	        status=TargetStatus.BACKOFF,
+    52	        next_allowed_at=now + timedelta(seconds=60),
+    53	    )
+    54	    decision = policy.prepare_request(t, now=now)
+    55	
+    56	    assert decision.allowed is False
+    57	    assert decision.delay_seconds > 0
+    58	
+    59	
+    60	def test_evaluate_response_304_short_circuit():
+    61	    policy = FetchPolicy()
+    62	    t = Target(id="t3", url="https://example.com", interval="15m", etag='"etag-1"')
+    63	    now = datetime.utcnow()
+    64	    ev = policy.evaluate_response(t, 304, now=now)
+    65	
+    66	    assert ev.new_status == TargetStatus.NORMAL
+    67	    assert ev.should_emit_signal is False
+    68	    assert ev.consecutive_failures == 0
+    69	    assert ev.updated_etag == '"etag-1"'
+    70	
+    71	
+    72	def test_evaluate_response_200_success():
+    73	    policy = FetchPolicy()
+    74	    t = Target(id="t4", url="https://example.com", interval="10m")
+    75	    now = datetime.utcnow()
+    76	    headers = {"etag": '"new-etag"', "last-modified": "Wed, 18 Aug 2026 12:00:00 GMT"}
+    77	    ev = policy.evaluate_response(t, 200, headers=headers, now=now)
+    78	
+    79	    assert ev.new_status == TargetStatus.NORMAL
+    80	    assert ev.should_emit_signal is True
+    81	    assert ev.consecutive_failures == 0
+    82	    assert ev.updated_etag == '"new-etag"'
+    83	    assert (ev.next_allowed_at - now).total_seconds() == 600.0
+    84	
+    85	
+    86	def test_evaluate_response_403_forbidden_cooldown():
+    87	    policy = FetchPolicy()
+    88	    t = Target(id="t5", url="https://example.com", consecutive_failures=0)
+    89	    now = datetime.utcnow()
+    90	    ev = policy.evaluate_response(t, 403, now=now)
+    91	
+    92	    assert ev.new_status == TargetStatus.COOLDOWN
+    93	    assert ev.consecutive_failures == 1
+    94	    assert ev.next_allowed_at is not None
+    95	    assert (ev.next_allowed_at - now).total_seconds() == 1800.0  # 30min
+    96	
+    97	
+    98	def test_evaluate_response_429_backoff_with_retry_after():
+    99	    policy = FetchPolicy()
+   100	    t = Target(id="t6", url="https://example.com", consecutive_failures=0)
+   101	    now = datetime(2026, 8, 18, 10, 0, 0)
+   102	    retry_date = "Tue, 18 Aug 2026 10:05:00 GMT"
+   103	    ev = policy.evaluate_response(t, 429, headers={"retry-after": retry_date}, now=now)
+   104	
+   105	    assert ev.new_status == TargetStatus.BACKOFF
+   106	    assert ev.consecutive_failures == 1
+   107	    assert ev.next_allowed_at is not None
+   108	    # diff should be 300s
+   109	    diff = (ev.next_allowed_at - now).total_seconds()
+   110	    assert 298.0 <= diff <= 302.0
+   111	
+   112	
+   113	def test_evaluate_response_5xx_escalates_to_cooldown_after_threshold():
+   114	    policy = FetchPolicy(max_consecutive_failures=3)
+   115	    t = Target(id="t7", url="https://example.com", consecutive_failures=2)
+   116	    now = datetime.utcnow()
+   117	    ev = policy.evaluate_response(t, 502, now=now)
+   118	
+   119	    assert ev.new_status == TargetStatus.COOLDOWN
+   120	    assert ev.consecutive_failures == 3
+   121	    assert ev.next_allowed_at is not None
+   122	    # ladder index 0: 30min
+   123	    diff = (ev.next_allowed_at - now).total_seconds()
+   124	    assert 1798.0 <= diff <= 1802.0
+   125	
+   126	
+   127	def test_backoff_contains_jitter():
+   128	    policy = FetchPolicy(base_backoff_sec=60.0, max_backoff_sec=600.0, jitter_ratio=0.2)
+   129	    t = Target(id="t8", url="https://example.com", consecutive_failures=1)
+   130	    now = datetime.utcnow()
+   131	    delays = []
+   132	    for _ in range(20):
+   133	        ev = policy.evaluate_response(t, 500, now=now)
+   134	        delays.append((ev.next_allowed_at - now).total_seconds())
+   135	    # raw backoff for failures=2: 60 * 2^(1) = 120s, with +/-20% jitter => [96, 144]
+   136	    assert all(96.0 <= d <= 144.0 for d in delays)
+   137	    # at least some variety
+   138	    assert len(set(delays)) > 1
+
+############################################################
+### FILE: tests/test_fetch_service.py
+############################################################
+     1	"""Tests for FetchService — single-fetch orchestration."""
+     2	
+     3	from datetime import datetime, timezone
+     4	from unittest.mock import MagicMock, patch
+     5	
+     6	import pytest
+     7	
+     8	from web_watcher.adapters import AdapterRegistry
+     9	from web_watcher.fetch import FetchRequest, FetchResult
+    10	from web_watcher.fetch_service import FetchService
+    11	from web_watcher.models import FetchState
+    12	from web_watcher.repository import Repository
+    13	from web_watcher.targets import WatchTarget
+    14	
+    15	
+    16	def _now() -> datetime:
+    17	    return datetime(2026, 8, 17, 10, 0, 0, tzinfo=timezone.utc)
+    18	
+    19	
+    20	def _mk_target(**overrides):
+    21	    defaults = {
+    22	        "key": "github:openai/gpt-4o",
+    23	        "target_type": "github_repository",
+    24	        "name": "GPT-4o",
+    25	        "locator": "openai/gpt-4o",
+    26	    }
+    27	    defaults.update(overrides)
+    28	    return WatchTarget(**defaults)
+    29	
+    30	
+    31	def _mk_result(**overrides):
+    32	    defaults = {
+    33	        "target_key": "github:openai/gpt-4o",
+    34	        "success": True,
+    35	        "status_code": 200,
+    36	        "fetched_at": _now(),
+    37	        "content": '{"name":"gpt-4o"}',
+    38	        "content_type": "application/json",
+    39	        "etag": "w/\"abc123\"",
+    40	        "last_modified": "Wed, 17 Aug 2026 10:00:00 GMT",
+    41	        "content_hash": None,
+    42	        "error": None,
+    43	        "metadata": {"source": "github"},
+    44	    }
+    45	    defaults.update(overrides)
+    46	    return FetchResult(**defaults)
+    47	
+    48	
+    49	def _mk_registry(adapter):
+    50	    return AdapterRegistry([adapter])
+    51	
+    52	
+    53	def _mk_adapter(calls=None):
+    54	    """Create a fake adapter that records calls and returns a result."""
+    55	    if calls is None:
+    56	        calls = []
+    57	
+    58	    class _FakeAdapter:
+    59	        def supports(self, target):
+    60	            return True
+    61	
+    62	        def fetch(self, request):
+    63	            calls.append(request)
+    64	            return _mk_result()
+    65	
+    66	    return _FakeAdapter(), calls
+    67	
+    68	
+    69	# ---------------------------------------------------------------------------
+    70	# fetch_one — happy path
+    71	# ---------------------------------------------------------------------------
+    72	
+    73	
+    74	class TestFetchOneHappyPath:
+    75	
+    76	    def test_returns_result_from_adapter(self, tmp_path):
+    77	        adapter, calls = _mk_adapter()
+    78	        registry = _mk_registry(adapter)
+    79	        repo = Repository(tmp_path / "watcher.db")
+    80	        service = FetchService(repository=repo, adapter_registry=registry)
+    81	
+    82	        result = service.fetch_one(_mk_target())
+    83	
+    84	        assert result.success is True
+    85	        assert result.target_key == "github:openai/gpt-4o"
+    86	        assert len(calls) == 1
+    87	        repo.close()
+    88	
+    89	    def test_passes_target_key_in_request(self, tmp_path):
+    90	        adapter, calls = _mk_adapter()
+    91	        registry = _mk_registry(adapter)
+    92	        repo = Repository(tmp_path / "watcher.db")
+    93	        service = FetchService(repository=repo, adapter_registry=registry)
+    94	
+    95	        service.fetch_one(_mk_target(key="github:torvalds/linux", locator="torvalds/linux"))
+    96	
+    97	        assert len(calls) == 1
+    98	        assert calls[0].target.key == "github:torvalds/linux"
+    99	        repo.close()
+   100	
+   101	    def test_persists_fetch_state_on_success(self, tmp_path):
+   102	        adapter, calls = _mk_adapter()
+   103	        registry = _mk_registry(adapter)
+   104	        repo = Repository(tmp_path / "watcher.db")
+   105	        service = FetchService(repository=repo, adapter_registry=registry)
+   106	
+   107	        result = service.fetch_one(_mk_target())
+   108	
+   109	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   110	        assert state is not None
+   111	        assert state.etag == "w/\"abc123\""
+   112	        assert state.last_modified == "Wed, 17 Aug 2026 10:00:00 GMT"
+   113	        assert state.content_hash is not None
+   114	        assert state.fetched_at == _now()
+   115	        repo.close()
+   116	
+   117	    def test_computes_sha256_content_hash(self, tmp_path):
+   118	        adapter, calls = _mk_adapter()
+   119	        registry = _mk_registry(adapter)
+   120	        repo = Repository(tmp_path / "watcher.db")
+   121	        service = FetchService(repository=repo, adapter_registry=registry)
+   122	
+   123	        service.fetch_one(_mk_target())
+   124	
+   125	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   126	        # The content is '{"name":"gpt-4o"}'
+   127	        import hashlib
+   128	
+   129	        expected = hashlib.sha256(b'{"name":"gpt-4o"}').hexdigest()
+   130	        assert state.content_hash == expected
+   131	        repo.close()
+   132	
+   133	
+   134	# ---------------------------------------------------------------------------
+   135	# Cache header pass-through
+   136	# ---------------------------------------------------------------------------
+   137	
+   138	
+   139	class TestCacheHeaderPassThrough:
+   140	
+   141	    def test_passes_cached_etag_and_last_modified(self, tmp_path):
+   142	        adapter, calls = _mk_adapter()
+   143	        registry = _mk_registry(adapter)
+   144	        repo = Repository(tmp_path / "watcher.db")
+   145	
+   146	        # Pre-populate fetch state
+   147	        repo.upsert_fetch_state(
+   148	            FetchState(
+   149	                target_key="github:openai/gpt-4o",
+   150	                etag="old-etag",
+   151	                last_modified="Mon, 15 Aug 2026 00:00:00 GMT",
+   152	                content_hash="prev-hash",
+   153	                fetched_at=_now(),
+   154	            )
+   155	        )
+   156	
+   157	        service = FetchService(repository=repo, adapter_registry=registry)
+   158	        service.fetch_one(_mk_target())
+   159	
+   160	        assert len(calls) == 1
+   161	        request = calls[0]
+   162	        assert request.etag == "old-etag"
+   163	        assert request.last_modified == "Mon, 15 Aug 2026 00:00:00 GMT"
+   164	        repo.close()
+   165	
+   166	    def test_no_cached_state_no_cache_headers(self, tmp_path):
+   167	        adapter, calls = _mk_adapter()
+   168	        registry = _mk_registry(adapter)
+   169	        repo = Repository(tmp_path / "watcher.db")
+   170	        service = FetchService(repository=repo, adapter_registry=registry)
+   171	
+   172	        service.fetch_one(_mk_target())
+   173	
+   174	        assert len(calls) == 1
+   175	        request = calls[0]
+   176	        assert request.etag is None
+   177	        assert request.last_modified is None
+   178	        repo.close()
+   179	
+   180	
+   181	# ---------------------------------------------------------------------------
+   182	# 304 Not Modified — no state update
+   183	# ---------------------------------------------------------------------------
+   184	
+   185	
+   186	class Test304NotModified:
+   187	
+   188	    def test_304_does_not_update_fetch_state(self, tmp_path):
+   189	        adapter, calls = _mk_adapter()
+   190	        registry = _mk_registry(adapter)
+   191	        repo = Repository(tmp_path / "watcher.db")
+   192	
+   193	        # Pre-populate with old state
+   194	        repo.upsert_fetch_state(
+   195	            FetchState(
+   196	                target_key="github:openai/gpt-4o",
+   197	                etag="old-etag",
+   198	                content_hash="old-hash",
+   199	                fetched_at=_now(),
+   200	            )
+   201	        )
+   202	
+   203	        class _Adapter304:
+   204	            def supports(self, target):
+   205	                return True
+   206	
+   207	            def fetch(self, request):
+   208	                calls.append(request)
+   209	                return FetchResult(
+   210	                    target_key="github:openai/gpt-4o",
+   211	                    success=True,
+   212	                    status_code=304,
+   213	                    fetched_at=_now(),
+   214	                    content=None,
+   215	                    etag="old-etag",
+   216	                    last_modified=None,
+   217	                    metadata={"source": "github", "unchanged": "true"},
+   218	                )
+   219	
+   220	        registry = _mk_registry(_Adapter304())
+   221	        service = FetchService(repository=repo, adapter_registry=registry)
+   222	        result = service.fetch_one(_mk_target())
+   223	
+   224	        assert result.success is True
+   225	        assert result.status_code == 304
+   226	
+   227	        # FetchState should be UNCHANGED
+   228	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   229	        assert state.etag == "old-etag"
+   230	        assert state.content_hash == "old-hash"
+   231	        repo.close()
+   232	
+   233	    def test_304_returns_success_result(self, tmp_path):
+   234	        adapter, calls = _mk_adapter()
+   235	        registry = _mk_registry(adapter)
+   236	        repo = Repository(tmp_path / "watcher.db")
+   237	        service = FetchService(repository=repo, adapter_registry=registry)
+   238	
+   239	        # Force 304 by pre-populating
+   240	        repo.upsert_fetch_state(
+   241	            FetchState(
+   242	                target_key="github:openai/gpt-4o",
+   243	                etag="cached-etag",
+   244	            )
+   245	        )
+   246	
+   247	        class _Adapter304:
+   248	            def supports(self, target):
+   249	                return True
+   250	
+   251	            def fetch(self, request):
+   252	                return FetchResult(
+   253	                    target_key="github:openai/gpt-4o",
+   254	                    success=True,
+   255	                    status_code=304,
+   256	                    fetched_at=_now(),
+   257	                    content=None,
+   258	                    etag="cached-etag",
+   259	                    metadata={"source": "github"},
+   260	                )
+   261	
+   262	        registry = _mk_registry(_Adapter304())
+   263	        service = FetchService(repository=repo, adapter_registry=registry)
+   264	        result = service.fetch_one(_mk_target())
+   265	
+   266	        assert result.success is True
+   267	        assert result.status_code == 304
+   268	        repo.close()
+   269	
+   270	
+   271	# ---------------------------------------------------------------------------
+   272	# Failure handling — state not overwritten
+   273	# ---------------------------------------------------------------------------
+   274	
+   275	
+   276	class TestFailureHandling:
+   277	
+   278	    def test_failure_does_not_overwrite_existing_state(self, tmp_path):
+   279	        adapter, calls = _mk_adapter()
+   280	        registry = _mk_registry(adapter)
+   281	        repo = Repository(tmp_path / "watcher.db")
+   282	
+   283	        # Pre-populate with valid state
+   284	        repo.upsert_fetch_state(
+   285	            FetchState(
+   286	                target_key="github:openai/gpt-4o",
+   287	                etag="good-etag",
+   288	                content_hash="good-hash",
+   289	                fetched_at=_now(),
+   290	            )
+   291	        )
+   292	
+   293	        class _FailingAdapter:
+   294	            def supports(self, target):
+   295	                return True
+   296	
+   297	            def fetch(self, request):
+   298	                return FetchResult(
+   299	                    target_key="github:openai/gpt-4o",
+   300	                    success=False,
+   301	                    status_code=404,
+   302	                    fetched_at=_now(),
+   303	                    error="Not Found",
+   304	                    metadata={"source": "github"},
+   305	                )
+   306	
+   307	        registry = _mk_registry(_FailingAdapter())
+   308	        service = FetchService(repository=repo, adapter_registry=registry)
+   309	        result = service.fetch_one(_mk_target())
+   310	
+   311	        assert result.success is False
+   312	        assert result.status_code == 404
+   313	
+   314	        # State should be UNCHANGED
+   315	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   316	        assert state is not None
+   317	        assert state.etag == "good-etag"
+   318	        assert state.content_hash == "good-hash"
+   319	        repo.close()
+   320	
+   321	    def test_failure_with_no_prior_state(self, tmp_path):
+   322	        adapter, calls = _mk_adapter()
+   323	        registry = _mk_registry(adapter)
+   324	        repo = Repository(tmp_path / "watcher.db")
+   325	
+   326	        class _FailingAdapter:
+   327	            def supports(self, target):
+   328	                return True
+   329	
+   330	            def fetch(self, request):
+   331	                return FetchResult(
+   332	                    target_key="github:openai/gpt-4o",
+   333	                    success=False,
+   334	                    status_code=500,
+   335	                    fetched_at=_now(),
+   336	                    error="Server Error",
+   337	                    metadata={"source": "github"},
+   338	                )
+   339	
+   340	        registry = _mk_registry(_FailingAdapter())
+   341	        service = FetchService(repository=repo, adapter_registry=registry)
+   342	        result = service.fetch_one(_mk_target())
+   343	
+   344	        assert result.success is False
+   345	
+   346	        # No state was created
+   347	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   348	        assert state is None
+   349	        repo.close()
+   350	
+   351	
+   352	# ---------------------------------------------------------------------------
+   353	# No content → no hash
+   354	# ---------------------------------------------------------------------------
+   355	
+   356	
+   357	class TestNoContent:
+   358	
+   359	    def test_success_with_no_content_creates_no_state(self, tmp_path):
+   360	        adapter, calls = _mk_adapter()
+   361	        registry = _mk_registry(adapter)
+   362	        repo = Repository(tmp_path / "watcher.db")
+   363	
+   364	        class _NoContentAdapter:
+   365	            def supports(self, target):
+   366	                return True
+   367	
+   368	            def fetch(self, request):
+   369	                return FetchResult(
+   370	                    target_key="github:openai/gpt-4o",
+   371	                    success=True,
+   372	                    status_code=204,
+   373	                    fetched_at=_now(),
+   374	                    content=None,
+   375	                    metadata={"source": "github"},
+   376	                )
+   377	
+   378	        registry = _mk_registry(_NoContentAdapter())
+   379	        service = FetchService(repository=repo, adapter_registry=registry)
+   380	        service.fetch_one(_mk_target())
+   381	
+   382	        # No state persisted (no content to hash)
+   383	        state = repo.get_fetch_state("github:openai/gpt-4o")
+   384	        assert state is None
+   385	        repo.close()
+   386	
+   387	
+   388	# ---------------------------------------------------------------------------
+   389	# Deterministic repeatable fetch
+   390	# ---------------------------------------------------------------------------
+   391	
+   392	
+   393	class TestDeterministicRepeatable:
+   394	
+   395	    def test_two_fetches_same_content_same_hash(self, tmp_path):
+   396	        adapter, calls = _mk_adapter()
+   397	        registry = _mk_registry(adapter)
+   398	        repo = Repository(tmp_path / "watcher.db")
+   399	        service = FetchService(repository=repo, adapter_registry=registry)
+   400	
+   401	        service.fetch_one(_mk_target())
+   402	        hash1 = repo.get_fetch_state("github:openai/gpt-4o").content_hash
+   403	
+   404	        service.fetch_one(_mk_target())
+   405	        hash2 = repo.get_fetch_state("github:openai/gpt-4o").content_hash
+   406	
+   407	        assert hash1 == hash2
+   408	        repo.close()
+   409	
+   410	    def test_different_content_different_hash(self, tmp_path):
+   411	        class _AdapterA:
+   412	            def supports(self, target):
+   413	                return True
+   414	
+   415	            def fetch(self, request):
+   416	                return FetchResult(
+   417	                    target_key="github:openai/gpt-4o",
+   418	                    success=True,
+   419	                    status_code=200,
+   420	                    fetched_at=_now(),
+   421	                    content='{"name":"a"}',
+   422	                    metadata={},
+   423	                )
+   424	
+   425	        class _AdapterB:
+   426	            def supports(self, target):
+   427	                return True
+   428	
+   429	            def fetch(self, request):
+   430	                return FetchResult(
+   431	                    target_key="github:openai/gpt-4o",
+   432	                    success=True,
+   433	                    status_code=200,
+   434	                    fetched_at=_now(),
+   435	                    content='{"name":"b"}',
+   436	                    metadata={},
+   437	                )
+   438	
+   439	        repo = Repository(tmp_path / "watcher.db")
+   440	        service = FetchService(
+   441	            repository=repo,
+   442	            adapter_registry=_mk_registry(_AdapterA()),
+   443	        )
+   444	        service.fetch_one(_mk_target())
+   445	        hash1 = repo.get_fetch_state("github:openai/gpt-4o").content_hash
+   446	
+   447	        service = FetchService(
+   448	            repository=repo,
+   449	            adapter_registry=_mk_registry(_AdapterB()),
+   450	        )
+   451	        service.fetch_one(_mk_target())
+   452	        hash2 = repo.get_fetch_state("github:openai/gpt-4o").content_hash
+   453	
+   454	        assert hash1 != hash2
+   455	        repo.close()
+   456	
+   457	
+   458	# ---------------------------------------------------------------------------
+   459	# Error propagation
+   460	# ---------------------------------------------------------------------------
+   461	
+   462	
+   463	class TestErrorPropagation:
+   464	
+   465	    def test_unsupported_target_raises(self, tmp_path):
+   466	        repo = Repository(tmp_path / "watcher.db")
+   467	        registry = AdapterRegistry()  # empty
+   468	        service = FetchService(repository=repo, adapter_registry=registry)
+   469	
+   470	        with pytest.raises(LookupError, match="no adapter"):
+   471	            service.fetch_one(_mk_target())
+   472	        repo.close()
+
+############################################################
+### FILE: tests/test_dom_extractor.py
+############################################################
+     1	from web_watcher.dom_extractor import DOMExtractor
+     2	from web_watcher.rule_models import ExtractorConfig, ExtractionStatus
+     3	
+     4	
+     5	HTML_DOC = """
+     6	<!DOCTYPE html>
+     7	<html>
+     8	<body>
+     9	    <header id="main-header">
+    10	        <h1 class="title brand">Product Pricing</h1>
+    11	    </header>
+    12	    <div class="container">
+    13	        <div class="pricing-card" id="pro-card">
+    14	            <span class="plan-name">Pro Plan</span>
+    15	            <div class="price-box">
+    16	                <span class="currency">$</span>
+    17	                <span class="amount">79.00</span>
+    18	                <span class="period">/month</span>
+    19	            </div>
+    20	            <p class="status badge-success">In Stock</p>
+    21	        </div>
+    22	    </div>
+    23	</body>
+    24	</html>
+    25	"""
+    26	
+    27	
+    28	def test_extract_by_id_and_class():
+    29	    cfg = ExtractorConfig(name="title", selector_type="css", selector="#main-header .title")
+    30	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    31	    assert res.status == ExtractionStatus.FOUND
+    32	    assert res.value == "Product Pricing"
+    33	
+    34	
+    35	def test_extract_nested_descendant():
+    36	    cfg = ExtractorConfig(name="amount", selector_type="css", selector="div.pricing-card div.price-box span.amount")
+    37	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    38	    assert res.status == ExtractionStatus.FOUND
+    39	    assert res.value == "79.00"
+    40	
+    41	
+    42	def test_extract_with_transforms():
+    43	    cfg = ExtractorConfig(
+    44	        name="pro_price",
+    45	        selector_type="css",
+    46	        selector="span.amount",
+    47	        transforms=["strip_tags", "to_float"],
+    48	    )
+    49	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    50	    assert res.status == ExtractionStatus.FOUND
+    51	    assert res.value == 79.0
+    52	
+    53	
+    54	def test_extract_by_regex():
+    55	    cfg = ExtractorConfig(
+    56	        name="sku",
+    57	        selector_type="regex",
+    58	        selector=r"Pro Plan",
+    59	    )
+    60	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    61	    assert res.status == ExtractionStatus.FOUND
+    62	    assert res.value == "Pro Plan"
+    63	
+    64	
+    65	def test_extract_missing_selector_returns_empty():
+    66	    cfg = ExtractorConfig(name="missing", selector_type="css", selector="#non-existent")
+    67	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    68	    assert res.status == ExtractionStatus.SELECTOR_NOT_FOUND
+    69	
+    70	
+    71	def test_extract_raw_text():
+    72	    cfg = ExtractorConfig(
+    73	        name="raw",
+    74	        selector_type="raw",
+    75	        selector="",
+    76	    )
+    77	    res = DOMExtractor.extract(HTML_DOC, cfg)
+    78	    assert res.status == ExtractionStatus.FOUND
+    79	    assert "Product Pricing" in res.value
+    80	    assert "Pro Plan" in res.value
+
+############################################################
+### FILE: tests/test_generic_web_target.py
+############################################################
+     1	import hashlib
+     2	from unittest.mock import MagicMock
+     3	from datetime import datetime, timedelta
+     4	from web_watcher.models import Target, TargetStatus
+     5	from web_watcher.fetcher import SmartFetcher, FetchResult
+     6	from web_watcher.fetch_policy import FetchPolicy
+     7	from web_watcher.rule_models import ExtractorConfig
+     8	from web_watcher.generic_web_target import GenericWebTarget
+     9	
+    10	
+    11	HTML_SAMPLE_V1 = """
+    12	<div class="pricing">
+    13	    <span class="plan">Pro</span>
+    14	    <span class="price">$99.00</span>
+    15	</div>
+    16	"""
+    17	
+    18	HTML_SAMPLE_V2 = """
+    19	<div class="pricing">
+    20	    <span class="plan">Pro</span>
+    21	    <span class="price">$79.00</span>
+    22	</div>
+    23	"""
+    24	
+    25	
+    26	def _make_extractors():
+    27	    return [
+    28	        ExtractorConfig(
+    29	            name="price",
+    30	            selector_type="css",
+    31	            selector="div.pricing .price",
+    32	            transforms=["strip_tags", "to_float"],
+    33	        )
+    34	    ]
+    35	
+    36	
+    37	def test_generic_web_target_skipped_when_in_cooldown():
+    38	    now = datetime.utcnow()
+    39	    target = Target(
+    40	        id="t_cooldown",
+    41	        url="https://example.com",
+    42	        status=TargetStatus.COOLDOWN,
+    43	        next_allowed_at=now + timedelta(seconds=600),
+    44	    )
+    45	    adapter = GenericWebTarget(target=target)
+    46	    res = adapter.execute(now=now)
+    47	
+    48	    assert res.allowed is False
+    49	    assert len(res.signals_emitted) == 0
+    50	    assert "cooldown" in res.reason.lower()
+    51	
+    52	
+    53	def test_generic_web_target_304_not_modified_short_circuit():
+    54	    now = datetime.utcnow()
+    55	    target = Target(id="t_304", url="https://example.com", etag='"etag-123"')
+    56	    adapter = GenericWebTarget(target=target)
+    57	
+    58	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    59	    mock_fetcher.fetch.return_value = FetchResult(
+    60	        status_code=304,
+    61	        is_304_not_modified=True,
+    62	        etag='"etag-123"',
+    63	    )
+    64	
+    65	    res = adapter.execute(fetcher=mock_fetcher, now=now)
+    66	
+    67	    assert res.allowed is True
+    68	    assert res.is_304 is True
+    69	    assert len(res.signals_emitted) == 0
+    70	    assert target.status == TargetStatus.NORMAL
+    71	
+    72	
+    73	def test_generic_web_target_initial_fetch_emits_signal():
+    74	    now = datetime.utcnow()
+    75	    target = Target(id="t_init", url="https://example.com/pricing")
+    76	    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+    77	
+    78	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    79	    mock_fetcher.fetch.return_value = FetchResult(
+    80	        status_code=200,
+    81	        content=HTML_SAMPLE_V1,
+    82	        etag='"etag-v1"',
+    83	    )
+    84	
+    85	    res = adapter.execute(fetcher=mock_fetcher, now=now)
+    86	
+    87	    assert res.allowed is True
+    88	    assert res.status_code == 200
+    89	    assert len(res.signals_emitted) == 1
+    90	    assert res.extracted_values["price"] == 99.0
+    91	    assert target.content_hash is not None
+    92	    assert target.etag == '"etag-v1"'
+    93	
+    94	
+    95	def test_generic_web_target_unchanged_content_no_signal():
+    96	    now = datetime.utcnow()
+    97	    target = Target(
+    98	        id="t_unchanged",
+    99	        url="https://example.com/pricing",
+   100	        content_hash=hashlib.sha256(HTML_SAMPLE_V1.encode("utf-8")).hexdigest(),
+   101	        metadata={"initialized": True},
+   102	    )
+   103	    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+   104	
+   105	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   106	    mock_fetcher.fetch.return_value = FetchResult(
+   107	        status_code=200,
+   108	        content=HTML_SAMPLE_V1,
+   109	        etag='"etag-v1"',
+   110	    )
+   111	
+   112	    res = adapter.execute(fetcher=mock_fetcher, now=now)
+   113	
+   114	    assert res.allowed is True
+   115	    assert res.status_code == 200
+   116	    assert len(res.signals_emitted) == 0
+   117	    assert "identical" in res.reason.lower()
+   118	
+   119	
+   120	def test_generic_web_target_content_changed_emits_signal():
+   121	    now = datetime.utcnow()
+   122	    target = Target(
+   123	        id="t_changed",
+   124	        url="https://example.com/pricing",
+   125	        content_hash=hashlib.sha256(HTML_SAMPLE_V1.encode("utf-8")).hexdigest(),
+   126	        metadata={"initialized": True},
+   127	    )
+   128	    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+   129	
+   130	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   131	    mock_fetcher.fetch.return_value = FetchResult(
+   132	        status_code=200,
+   133	        content=HTML_SAMPLE_V2,
+   134	        etag='"etag-v2"',
+   135	    )
+   136	
+   137	    res = adapter.execute(fetcher=mock_fetcher, now=now)
+   138	
+   139	    assert res.allowed is True
+   140	    assert res.status_code == 200
+   141	    assert len(res.signals_emitted) == 1
+   142	    assert res.extracted_values["price"] == 79.0
+   143	    assert target.content_hash == hashlib.sha256(HTML_SAMPLE_V2.encode("utf-8")).hexdigest()
+   144	
+   145	
+   146	def test_generic_web_target_non_200_status_no_signal():
+   147	    now = datetime.utcnow()
+   148	    target = Target(id="t_500", url="https://example.com")
+   149	    adapter = GenericWebTarget(target=target)
+   150	
+   151	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   152	    mock_fetcher.fetch.return_value = FetchResult(
+   153	        status_code=500,
+   154	        content="Internal Server Error",
+   155	        error=None,
+   156	    )
+   157	
+   158	    res = adapter.execute(fetcher=mock_fetcher, now=now)
+   159	
+   160	    assert res.allowed is True
+   161	    assert res.status_code == 500
+   162	    assert len(res.signals_emitted) == 0
+   163	    assert target.status == TargetStatus.BACKOFF
+   164	
+   165	
+   166	def test_generic_web_target_custom_headers_passed_to_fetcher():
+   167	    now = datetime.utcnow()
+   168	    target = Target(id="t_headers", url="https://example.com")
+   169	    adapter = GenericWebTarget(
+   170	        target=target,
+   171	        custom_headers={"X-Custom-Header": "test-value"},
+   172	    )
+   173	
+   174	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   175	    mock_fetcher.fetch.return_value = FetchResult(
+   176	        status_code=200,
+   177	        content=HTML_SAMPLE_V1,
+   178	        etag='"etag-v1"',
+   179	    )
+   180	
+   181	    adapter.execute(fetcher=mock_fetcher, now=now)
+   182	
+   183	    mock_fetcher.fetch.assert_called_once()
+   184	    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+   185	    assert call_kwargs["custom_headers"]["X-Custom-Header"] == "test-value"
+   186	    assert call_kwargs["url"] == "https://example.com"
+   187	
+   188	
+   189	def test_generic_web_target_repo_saves_target_and_signal():
+   190	    now = datetime.utcnow()
+   191	    target = Target(id="t_repo", url="https://example.com")
+   192	    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+   193	
+   194	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   195	    mock_fetcher.fetch.return_value = FetchResult(
+   196	        status_code=200,
+   197	        content=HTML_SAMPLE_V1,
+   198	        etag='"etag-v1"',
+   199	    )
+   200	
+   201	    mock_repo = MagicMock()
+   202	    mock_repo.save_target.return_value = None
+   203	    mock_repo.save_signal.return_value = None
+   204	
+   205	    res = adapter.execute(fetcher=mock_fetcher, repo=mock_repo, now=now)
+   206	
+   207	    assert res.allowed is True
+   208	    assert len(res.signals_emitted) == 1
+   209	    mock_repo.save_target.assert_called_once_with(target)
+   210	    mock_repo.save_signal.assert_called_once()
+
+############################################################
+### FILE: tests/test_github_target.py
+############################################################
+     1	import json
+     2	from unittest.mock import MagicMock
+     3	from datetime import datetime
+     4	from web_watcher.models import Target, TargetStatus
+     5	from web_watcher.fetcher import SmartFetcher, FetchResult
+     6	from web_watcher.github_target import GitHubTarget, parse_github_repo
+     7	
+     8	
+     9	RELEASE_PAYLOAD = {
+    10	    "tag_name": "v2.1.0",
+    11	    "name": "Flask 2.1.0 Released",
+    12	    "html_url": "https://github.com/pallets/flask/releases/tag/v2.1.0",
+    13	    "published_at": "2026-08-18T10:00:00Z",
+    14	    "body": "Changelog details",
+    15	}
+    16	
+    17	REPO_META_PAYLOAD = {
+    18	    "stargazers_count": 3500,
+    19	}
+    20	
+    21	
+    22	def test_parse_github_repo():
+    23	    assert parse_github_repo("https://github.com/pallets/flask") == ("pallets", "flask")
+    24	    assert parse_github_repo("https://github.com/psf/requests.git") == ("psf", "requests")
+    25	    assert parse_github_repo("torvalds/linux") == ("torvalds", "linux")
+    26	
+    27	
+    28	def test_github_target_release_published_signal():
+    29	    target = Target(id="gh_flask", url="pallets/flask", metadata={"last_release_tag": "v2.0.0"})
+    30	    adapter = GitHubTarget(target=target, watch_types=["releases"])
+    31	
+    32	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    33	    mock_fetcher.fetch.return_value = FetchResult(
+    34	        status_code=200,
+    35	        content=json.dumps(RELEASE_PAYLOAD),
+    36	        etag='"rel-etag-210"',
+    37	    )
+    38	
+    39	    res = adapter.execute(fetcher=mock_fetcher)
+    40	
+    41	    assert res.allowed is True
+    42	    assert len(res.signals_emitted) == 1
+    43	    sig = res.signals_emitted[0]
+    44	    payload = sig.payload if hasattr(sig, "payload") else sig
+    45	    assert payload["tag_name"] == "v2.1.0"
+    46	    assert payload["owner"] == "pallets"
+    47	    assert target.metadata["last_release_tag"] == "v2.1.0"
+    48	    assert target.metadata["release_etag"] == '"rel-etag-210"'
+    49	
+    50	
+    51	def test_github_target_no_release_signal_when_unchanged():
+    52	    target = Target(id="gh_flask", url="pallets/flask", metadata={"last_release_tag": "v2.1.0", "release_etag": '"rel-etag-210"'})
+    53	    adapter = GitHubTarget(target=target, watch_types=["releases"])
+    54	
+    55	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    56	    mock_fetcher.fetch.return_value = FetchResult(
+    57	        status_code=304,
+    58	        is_304_not_modified=True,
+    59	        etag='"rel-etag-210"',
+    60	    )
+    61	
+    62	    res = adapter.execute(fetcher=mock_fetcher)
+    63	
+    64	    assert res.allowed is True
+    65	    assert len(res.signals_emitted) == 0
+    66	    assert res.is_304 is True
+    67	
+    68	
+    69	def test_github_target_star_delta_signal():
+    70	    target = Target(id="gh_flask", url="pallets/flask", metadata={"last_stars": 3499})
+    71	    adapter = GitHubTarget(target=target, watch_types=["stars"], star_delta_threshold=1)
+    72	
+    73	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    74	    mock_fetcher.fetch.return_value = FetchResult(
+    75	        status_code=200,
+    76	        content=json.dumps(REPO_META_PAYLOAD),
+    77	        etag='"repo-etag-3500"',
+    78	    )
+    79	
+    80	    res = adapter.execute(fetcher=mock_fetcher)
+    81	
+    82	    assert res.allowed is True
+    83	    assert len(res.signals_emitted) == 1
+    84	    sig = res.signals_emitted[0]
+    85	    payload = sig.payload if hasattr(sig, "payload") else sig
+    86	    assert payload["delta"] == 1
+    87	    assert payload["new_stars"] == 3500
+    88	
+    89	
+    90	def test_github_target_star_delta_below_threshold():
+    91	    target = Target(id="gh_flask", url="pallets/flask", metadata={"last_stars": 3500})
+    92	    adapter = GitHubTarget(target=target, watch_types=["stars"], star_delta_threshold=5)
+    93	
+    94	    repo_payload = dict(REPO_META_PAYLOAD)
+    95	    repo_payload["stargazers_count"] = 3502
+    96	    mock_fetcher = MagicMock(spec=SmartFetcher)
+    97	    mock_fetcher.fetch.return_value = FetchResult(
+    98	        status_code=200,
+    99	        content=json.dumps(repo_payload),
+   100	        etag='"repo-etag-3502"',
+   101	    )
+   102	
+   103	    res = adapter.execute(fetcher=mock_fetcher)
+   104	
+   105	    assert res.allowed is True
+   106	    assert len(res.signals_emitted) == 0
+   107	
+   108	
+   109	def test_github_target_in_cooldown_is_skipped():
+   110	    now = datetime.utcnow()
+   111	    target = Target(
+   112	        id="gh_cooldown",
+   113	        url="pallets/flask",
+   114	        status=TargetStatus.COOLDOWN,
+   115	        next_allowed_at=now + __import__("datetime").timedelta(seconds=600),
+   116	    )
+   117	    adapter = GitHubTarget(target=target, watch_types=["releases"])
+   118	    res = adapter.execute(now=now)
+   119	
+   120	    assert res.allowed is False
+   121	    assert len(res.signals_emitted) == 0
+   122	
+   123	
+   124	def test_github_target_repo_saves_target_and_signal():
+   125	    target = Target(id="gh_save", url="pallets/flask", metadata={"last_release_tag": "v2.0.0"})
+   126	    adapter = GitHubTarget(target=target, watch_types=["releases"])
+   127	
+   128	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   129	    mock_fetcher.fetch.return_value = FetchResult(
+   130	        status_code=200,
+   131	        content=json.dumps(RELEASE_PAYLOAD),
+   132	        etag='"rel-etag-210"',
+   133	    )
+   134	
+   135	    mock_repo = MagicMock()
+   136	    mock_repo.save_target.return_value = None
+   137	    mock_repo.save_signal.return_value = None
+   138	
+   139	    res = adapter.execute(fetcher=mock_fetcher, repo=mock_repo)
+   140	
+   141	    assert res.allowed is True
+   142	    assert len(res.signals_emitted) == 1
+   143	    mock_repo.save_target.assert_called_once_with(target)
+   144	    mock_repo.save_signal.assert_called_once()
+   145	
+   146	
+   147	def test_github_target_mixed_watch_types_emits_both_signals():
+   148	    target = Target(
+   149	        id="gh_mixed",
+   150	        url="pallets/flask",
+   151	        metadata={"last_release_tag": "v2.0.0", "last_stars": 3499},
+   152	    )
+   153	    adapter = GitHubTarget(target=target, watch_types=["releases", "stars"])
+   154	
+   155	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   156	    mock_fetcher.fetch.side_effect = [
+   157	        FetchResult(status_code=200, content=json.dumps(RELEASE_PAYLOAD), etag='"rel-etag-210"'),
+   158	        FetchResult(status_code=200, content=json.dumps(REPO_META_PAYLOAD), etag='"repo-etag-3500"'),
+   159	    ]
+   160	
+   161	    res = adapter.execute(fetcher=mock_fetcher)
+   162	
+   163	    assert res.allowed is True
+   164	    assert len(res.signals_emitted) == 2
+   165	    sigs = [s.payload if hasattr(s, "payload") else s for s in res.signals_emitted]
+   166	    assert any(p.get("tag_name") == "v2.1.0" for p in sigs)
+   167	    assert any(p.get("new_stars") == 3500 for p in sigs)
+   168	
+   169	
+   170	def test_github_target_token_added_to_headers():
+   171	    target = Target(id="gh_token", url="pallets/flask")
+   172	    adapter = GitHubTarget(target=target, token="ghp_token_123", watch_types=["releases"])
+   173	
+   174	    mock_fetcher = MagicMock(spec=SmartFetcher)
+   175	    mock_fetcher.fetch.return_value = FetchResult(
+   176	        status_code=200,
+   177	        content=json.dumps(RELEASE_PAYLOAD),
+   178	        etag='"rel-etag-210"',
+   179	    )
+   180	
+   181	    adapter.execute(fetcher=mock_fetcher)
+   182	
+   183	    mock_fetcher.fetch.assert_called_once()
+   184	    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+   185	    assert call_kwargs["custom_headers"]["Authorization"] == "Bearer ghp_token_123"
+
+============================================================
+CURRENT DIFF
+============================================================
+
+============================================================
+STATUS
+============================================================
+?? AUDIT_REPORT.md
+?? AUDIT_TODO.md
+?? audit/
+
+============================================================
+R2 EXACT SNAPSHOT COMPLETE
+============================================================

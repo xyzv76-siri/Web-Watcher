@@ -20,11 +20,18 @@ def test_correlator_auto_investigate_disabled_by_default():
     signal = repo.create_signal(entity.id, SignalType.CONTENT_CHANGE, observed_at=now, value="diff")
 
     correlator = EventCorrelator(repository=repo, auto_investigate=False)
-    event = correlator.process_signal(signal)
+    plan = correlator.process_signal(signal)
+    repo.commit_plan(plan)
 
-    assert event is not None
-    assert event.importance == Importance.IMPORTANT
-    assert repo.get_investigation_result_by_event(event.id) is None
+    # Verify the plan was created correctly
+    assert plan is not None
+    assert len(plan.events_to_create) == 1
+    assert plan.events_to_create[0].importance == Importance.IMPORTANT.value
+
+    # No investigation should exist (auto_investigate=False means process_signal does not dispatch)
+    evt = repo.find_open_event_for_entity(entity.id, event_type="content_change")
+    assert evt is not None
+    assert repo.get_investigation_result_by_event(evt.id) is None
 
 
 def test_correlator_auto_investigate_triggers_on_important_event():
@@ -50,10 +57,18 @@ def test_correlator_auto_investigate_triggers_on_important_event():
         planner=mock_planner,
         engine=mock_engine,
     )
-    event = correlator.process_signal(signal)
+    plan = correlator.process_signal(signal)
+    repo.commit_plan(plan)
 
-    assert event is not None
-    saved_inv = repo.get_investigation_result_by_event(event.id)
+    # Get the created event
+    evt = repo.find_open_event_for_entity(entity.id, event_type="content_change")
+    assert evt is not None
+
+    # Dispatch investigation manually (in new architecture, this is done out-of-band)
+    dispatched = correlator.dispatch_investigation(evt)
+    assert dispatched is True
+
+    saved_inv = repo.get_investigation_result_by_event(evt.id)
     assert saved_inv is not None
     assert saved_inv["summary"] == "Automated pipeline investigation verified changes"
     assert len(saved_inv["evidence"]) == 1
@@ -67,10 +82,17 @@ def test_correlator_auto_investigate_skips_ineligible_event():
     signal = repo.create_signal(entity.id, SignalType.STARS_CHANGED, observed_at=now, value="105")
 
     correlator = EventCorrelator(repository=repo, auto_investigate=True)
-    event = correlator.process_signal(signal)
+    plan = correlator.process_signal(signal)
+    repo.commit_plan(plan)
 
-    assert event.importance == Importance.INTERESTING
-    assert repo.get_investigation_result_by_event(event.id) is None
+    evt = repo.find_open_event_for_entity(entity.id, event_type="stars_changed")
+    assert evt is not None
+    assert evt.importance == Importance.INTERESTING.value
+
+    # Even with auto_investigate=True, dispatch_investigation should skip ineligible events
+    dispatched = correlator.dispatch_investigation(evt)
+    assert dispatched is False
+    assert repo.get_investigation_result_by_event(evt.id) is None
 
 
 def test_correlator_auto_investigate_idempotent_on_multi_signals():
@@ -92,9 +114,19 @@ def test_correlator_auto_investigate_idempotent_on_multi_signals():
     sig1 = repo.create_signal(entity.id, SignalType.CONTENT_CHANGE, observed_at=now, value="change1")
     sig2 = repo.create_signal(entity.id, SignalType.CONTENT_CHANGE, observed_at=now, value="change2")
 
-    event1 = correlator.process_signal(sig1)
-    event2 = correlator.process_signal(sig2)
+    plan1 = correlator.process_signal(sig1)
+    repo.commit_plan(plan1)
+    plan2 = correlator.process_signal(sig2)
+    repo.commit_plan(plan2)
 
-    assert event1.id == event2.id
+    # Both signals should resolve to the same event
+    evt = repo.find_open_event_for_entity(entity.id, event_type="content_change")
+    assert evt is not None
+    assert plan2.merged_event_id == evt.id
+
+    # Dispatch investigation manually
+    dispatched = correlator.dispatch_investigation(evt)
+    assert dispatched is True
+
     assert mock_engine.execute.call_count == 1
-    assert repo.get_investigation_result_by_event(event1.id) is not None
+    assert repo.get_investigation_result_by_event(evt.id) is not None

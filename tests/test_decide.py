@@ -11,7 +11,8 @@ from dataclasses import asdict
 
 import pytest
 
-from web_watcher.ai_contract import AIJudge, MockProvider
+from tests.mock_ai_provider import MockProvider
+from web_watcher.ai_contract import AIJudge
 from web_watcher.decide import decide_event
 from web_watcher.final_decision import DecisionStatus
 from web_watcher.models import Event

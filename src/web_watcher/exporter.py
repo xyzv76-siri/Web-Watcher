@@ -1,6 +1,6 @@
 import re
 import html
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from web_watcher.repository import Repository
 
@@ -9,7 +9,7 @@ def parse_since(since_str: Optional[str]) -> Optional[datetime]:
     if not since_str:
         return None
     since_str = since_str.strip().lower()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     match = re.match(r"^(\d+)([smhd])$", since_str)
     if match:
         val, unit = int(match.group(1)), match.group(2)
@@ -22,7 +22,10 @@ def parse_since(since_str: Optional[str]) -> Optional[datetime]:
         elif unit == "d":
             return now - timedelta(days=val)
     try:
-        return datetime.fromisoformat(since_str)
+        dt = datetime.fromisoformat(since_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return now - timedelta(hours=24)
 
@@ -54,7 +57,7 @@ class AuditExporter:
         return {
             "events": events,
             "notifications": notifications,
-            "generated_at": datetime.utcnow(),
+            "generated_at": datetime.now(timezone.utc),
             "since": since,
         }
 

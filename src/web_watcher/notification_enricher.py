@@ -4,6 +4,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from .models import Event, Notification
+from .notification_status import NotificationStatus
 from .repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ class NotificationEnricher:
         self,
         event: Event,
         channel: str = "webhook",
-        status: str = "pending",
+        status: NotificationStatus = NotificationStatus.PENDING,
         base_payload: Optional[Dict[str, Any]] = None,
     ) -> Notification:
         """Builds the enriched payload and persists the notification to the repository."""

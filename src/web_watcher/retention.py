@@ -1,6 +1,6 @@
 """Data retention policy enforcement (Phase 16-A)."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass
 from web_watcher.config import AppConfig
@@ -42,7 +42,7 @@ class RetentionManager:
         if self.policy.dry_run:
             return summary
 
-        cutoff = datetime.utcnow() - timedelta(days=self.policy.max_age_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.policy.max_age_days)
 
         if hasattr(self.repo, "delete_old_events"):
             summary["deleted_events"] = self.repo.delete_old_events(cutoff=cutoff)

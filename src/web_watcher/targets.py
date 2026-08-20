@@ -2,12 +2,14 @@
 
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 
 SUPPORTED_TARGET_TYPES = frozenset({
     "github_repository",
     "official_website",
     "news_source",
+    "web",
 })
 
 
@@ -47,6 +49,28 @@ def validate_watch_target(target: WatchTarget) -> None:
             )
 
 
+def _validate_url(url: str) -> None:
+    """Validate that a URL is well-formed, has a scheme, has a hostname, and only uses http/https."""
+    if not url or not url.strip():
+        raise ValueError("URL must not be empty")
+
+    try:
+        parsed = urlparse(url.strip())
+    except Exception as exc:
+        raise ValueError(f"Invalid URL: {exc}") from exc
+
+    if not parsed.scheme:
+        raise ValueError("URL must have a scheme")
+
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(
+            f"URL scheme must be http or https, got: {parsed.scheme}"
+        )
+
+    if not parsed.hostname:
+        raise ValueError("URL must have a hostname")
+
+
 def validate_target_url_policy(target: WatchTarget) -> None:
     """
     Validate locator policy without performing network access.
@@ -63,11 +87,24 @@ def validate_target_url_policy(target: WatchTarget) -> None:
     if target.target_type in {
         "official_website",
         "news_source",
+        "web",
     }:
-        if not (
-            target.locator.startswith("https://")
-            or target.locator.startswith("http://")
-        ):
-            raise ValueError(
-                "web target locator must use http:// or https://"
-            )
+        _validate_url(target.locator)
+
+
+def validate_selector(selector_type: str, selector: str) -> None:
+    """Validate basic selector configuration format.
+
+    - selector_type must be 'css' or 'xpath'.
+    - selector must be a non-empty string.
+    """
+    if not selector_type or not selector_type.strip():
+        raise ValueError("selector type must not be empty")
+
+    if selector_type not in {"css", "xpath"}:
+        raise ValueError(
+            f"selector type must be 'css' or 'xpath', got: {selector_type}"
+        )
+
+    if not selector or not selector.strip():
+        raise ValueError("selector must not be empty")

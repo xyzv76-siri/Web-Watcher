@@ -2,10 +2,12 @@ import hashlib
 from unittest.mock import MagicMock
 from datetime import datetime, timedelta
 from web_watcher.models import Target, TargetStatus
+from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.rule_models import ExtractorConfig
 from web_watcher.generic_web_target import GenericWebTarget
+from web_watcher.execution_semantics import ExecutionOutcome
 
 
 HTML_SAMPLE_V1 = """
@@ -57,8 +59,10 @@ def test_generic_web_target_304_not_modified_short_circuit():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_304",
+        status=FetchStatus.NOT_MODIFIED,
         status_code=304,
-        is_304_not_modified=True,
+        fetched_at=now,
         etag='"etag-123"',
     )
 
@@ -70,41 +74,17 @@ def test_generic_web_target_304_not_modified_short_circuit():
     assert target.status == TargetStatus.NORMAL
 
 
-def test_generic_web_target_initial_fetch_emits_signal():
+def test_generic_web_target_initial_fetch_establishes_baseline():
     now = datetime.utcnow()
     target = Target(id="t_init", url="https://example.com/pricing")
     adapter = GenericWebTarget(target=target, extractors=_make_extractors())
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_init",
+        status=FetchStatus.SUCCESS,
         status_code=200,
-        content=HTML_SAMPLE_V1,
-        etag='"etag-v1"',
-    )
-
-    res = adapter.execute(fetcher=mock_fetcher, now=now)
-
-    assert res.allowed is True
-    assert res.status_code == 200
-    assert len(res.signals_emitted) == 1
-    assert res.extracted_values["price"] == 99.0
-    assert target.content_hash is not None
-    assert target.etag == '"etag-v1"'
-
-
-def test_generic_web_target_unchanged_content_no_signal():
-    now = datetime.utcnow()
-    target = Target(
-        id="t_unchanged",
-        url="https://example.com/pricing",
-        content_hash=hashlib.sha256(HTML_SAMPLE_V1.encode("utf-8")).hexdigest(),
-        metadata={"initialized": True},
-    )
-    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
-
-    mock_fetcher = MagicMock(spec=SmartFetcher)
-    mock_fetcher.fetch.return_value = FetchResult(
-        status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -114,7 +94,37 @@ def test_generic_web_target_unchanged_content_no_signal():
     assert res.allowed is True
     assert res.status_code == 200
     assert len(res.signals_emitted) == 0
-    assert "identical" in res.reason.lower()
+    assert res.observation.status == "first_observation"
+    assert res.updated_metadata.get("initialized") is True
+    assert res.updated_metadata.get("normalized_values", {}).get("price") == "99.0"
+
+
+def test_generic_web_target_unchanged_content_no_signal():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_unchanged",
+        url="https://example.com/pricing",
+        metadata={"initialized": True, "normalized_values": {"price": "99.0"}},
+    )
+    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_unchanged",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V1,
+        etag='"etag-v1"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert res.status_code == 200
+    assert len(res.signals_emitted) == 0
+    assert res.outcome == ExecutionOutcome.SUCCESS_UNCHANGED
+    assert "unchanged" in res.reason.lower() or "identical" in res.reason.lower()
 
 
 def test_generic_web_target_content_changed_emits_signal():
@@ -122,14 +132,16 @@ def test_generic_web_target_content_changed_emits_signal():
     target = Target(
         id="t_changed",
         url="https://example.com/pricing",
-        content_hash=hashlib.sha256(HTML_SAMPLE_V1.encode("utf-8")).hexdigest(),
-        metadata={"initialized": True},
+        metadata={"initialized": True, "normalized_values": {"price": "99.0"}},
     )
     adapter = GenericWebTarget(target=target, extractors=_make_extractors())
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_changed",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V2,
         etag='"etag-v2"',
     )
@@ -140,7 +152,7 @@ def test_generic_web_target_content_changed_emits_signal():
     assert res.status_code == 200
     assert len(res.signals_emitted) == 1
     assert res.extracted_values["price"] == 79.0
-    assert target.content_hash == hashlib.sha256(HTML_SAMPLE_V2.encode("utf-8")).hexdigest()
+    assert res.outcome == ExecutionOutcome.SUCCESS_CHANGED
 
 
 def test_generic_web_target_non_200_status_no_signal():
@@ -150,7 +162,10 @@ def test_generic_web_target_non_200_status_no_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_500",
+        status=FetchStatus.HTTP_ERROR,
         status_code=500,
+        fetched_at=now,
         content="Internal Server Error",
         error=None,
     )
@@ -160,7 +175,8 @@ def test_generic_web_target_non_200_status_no_signal():
     assert res.allowed is True
     assert res.status_code == 500
     assert len(res.signals_emitted) == 0
-    assert target.status == TargetStatus.BACKOFF
+    # Package A contract: adapter must not mutate target; state is returned in result
+    assert res.new_status == TargetStatus.BACKOFF
 
 
 def test_generic_web_target_custom_headers_passed_to_fetcher():
@@ -173,7 +189,10 @@ def test_generic_web_target_custom_headers_passed_to_fetcher():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_headers",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -193,7 +212,10 @@ def test_generic_web_target_repo_saves_target_and_signal():
 
     mock_fetcher = MagicMock(spec=SmartFetcher)
     mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_repo",
+        status=FetchStatus.SUCCESS,
         status_code=200,
+        fetched_at=now,
         content=HTML_SAMPLE_V1,
         etag='"etag-v1"',
     )
@@ -205,6 +227,10 @@ def test_generic_web_target_repo_saves_target_and_signal():
     res = adapter.execute(fetcher=mock_fetcher, repo=mock_repo, now=now)
 
     assert res.allowed is True
-    assert len(res.signals_emitted) == 1
-    mock_repo.save_target.assert_called_once_with(target)
-    mock_repo.save_signal.assert_called_once()
+    # Package A contract: adapter must not persist directly
+    mock_repo.save_target.assert_not_called()
+    mock_repo.save_signal.assert_not_called()
+    # First observation establishes baseline without emitting a signal
+    assert len(res.signals_emitted) == 0
+    assert res.updated_etag == '"etag-v1"'
+    assert res.observation.status == "first_observation"

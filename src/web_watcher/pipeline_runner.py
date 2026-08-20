@@ -8,6 +8,7 @@ from .event_correlator import EventCorrelator
 from .models import Entity, Event, Notification, Signal
 from .notification_dispatcher import NotificationDispatcher
 from .notification_enricher import NotificationEnricher
+from .notification_status import NotificationStatus
 from .repository import Repository
 from .config import AppConfig
 
@@ -49,15 +50,34 @@ class PipelineRunner:
 
     def process_signal(self, signal: Signal) -> Dict[str, Any]:
         """Processes a single signal through correlation, investigation, enriched notification creation, and optional delivery."""
-        event = self.correlator.process_signal(signal)
+        plan = self.correlator.process_signal(signal)
+
+        # Persist the plan atomically (no target fencing for signal-driven flows)
+        persisted = self.repository.commit_plan(correlation_plan=plan)
+        if not persisted:
+            raise RuntimeError("Failed to persist correlation plan")
+
+        # Retrieve the merged event to build notifications
+        event = None
+        if plan.merged_event_id is not None:
+            event = self.repository.get_event(plan.merged_event_id)
+        elif plan.events_to_create:
+            first = plan.events_to_create[0]
+            open_event = self.repository.find_open_event_for_entity(
+                entity_id=first.entity_id,
+                event_type=first.event_type,
+            )
+            if open_event:
+                event = open_event
+
         notification: Optional[Notification] = None
         delivery_result: Optional[DeliveryResult] = None
 
-        if self.auto_notify:
+        if self.auto_notify and event is not None:
             notification = self.enricher.create_enriched_notification(
                 event=event,
                 channel=self.notify_channel,
-                status="pending",
+                status=NotificationStatus.PENDING,
             )
             if self.auto_deliver and self.dispatcher:
                 delivery_result = self.dispatcher.dispatch(notification)

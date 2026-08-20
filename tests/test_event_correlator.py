@@ -261,11 +261,15 @@ class TestCorrelationWithinWindow:
         sig1 = _sig(id_=1, entity_id=eid, observed_at=_ts(2026, 8, 17, 10), fingerprint="fp-1")
         sig2 = _sig(id_=2, entity_id=eid, observed_at=_ts(2026, 8, 17, 11), fingerprint="fp-2")
 
-        e1 = correlator.correlate(sig1)
-        e2 = correlator.correlate(sig2)
+        plan1 = correlator.process_signal(sig1)
+        repo.commit_plan(plan1)
+        plan2 = correlator.process_signal(sig2)
+        repo.commit_plan(plan2)
 
-        assert e1.id == e2.id  # same Event
-        signals = repo.get_event_signals(e1.id)
+        assert len(plan1.events_to_create) == 1
+        # Second signal joins the existing event
+        assert plan2.merged_event_id is not None
+        signals = repo.get_event_signals(plan2.merged_event_id)
         assert len(signals) == 2
         repo.close()
 
@@ -291,10 +295,17 @@ class TestCorrelationOutsideWindow:
         sig1 = _sig(id_=1, entity_id=eid, observed_at=_ts(2026, 8, 1, 10), fingerprint="fp-1")
         sig2 = _sig(id_=2, entity_id=eid, observed_at=_ts(2026, 8, 17, 11), fingerprint="fp-2")
 
-        e1 = correlator.correlate(sig1)
-        e2 = correlator.correlate(sig2)
+        plan1 = correlator.process_signal(sig1)
+        repo.commit_plan(plan1)
+        plan2 = correlator.process_signal(sig2)
+        repo.commit_plan(plan2)
 
-        assert e1.id != e2.id
+        assert len(plan1.events_to_create) == 1
+        assert len(plan2.events_to_create) == 1
+        evts = repo.connection.execute(
+            "SELECT id FROM events WHERE entity_id = ? ORDER BY created_at", (eid,)
+        ).fetchall()
+        assert len(evts) == 2
         repo.close()
 
 
@@ -318,15 +329,24 @@ class TestCorrelationDifferentEntities:
         sig_a = _sig(id_=1, entity_id=eid_a, observed_at=_ts(2026, 8, 17, 10), fingerprint="fp-a")
         sig_b = _sig(id_=2, entity_id=eid_b, observed_at=_ts(2026, 8, 17, 11), fingerprint="fp-b")
 
-        e_a = correlator.correlate(sig_a)
-        e_b = correlator.correlate(sig_b)
+        plan_a = correlator.process_signal(sig_a)
+        repo.commit_plan(plan_a)
+        plan_b = correlator.process_signal(sig_b)
+        repo.commit_plan(plan_b)
 
-        assert e_a.id != e_b.id
-        assert e_a.entity_id == 1
-        assert e_b.entity_id == 2
+        assert len(plan_a.events_to_create) == 1
+        assert len(plan_b.events_to_create) == 1
+        evts = repo.connection.execute(
+            "SELECT entity_id FROM events ORDER BY created_at"
+        ).fetchall()
+        assert len(evts) == 2
+        assert evts[0]["entity_id"] == eid_a
+        assert evts[1]["entity_id"] == eid_b
 
-        # Signal A1 is NOT in Event B
-        sigs_in_b = repo.get_event_signals(e_b.id)
+        # Signal A is NOT in Event B
+        evt_b = repo.find_open_event_for_entity(eid_b, event_type="content_change")
+        assert evt_b is not None
+        sigs_in_b = repo.get_event_signals(evt_b.id)
         assert all(s.id != sig_a.id for s in sigs_in_b)
         repo.close()
 
@@ -348,19 +368,26 @@ class TestClosedEvent:
         )
 
         sig1 = _sig(id_=1, entity_id=eid, observed_at=_ts(2026, 8, 17, 10), fingerprint="fp-1")
-        e = correlator.correlate(sig1)
+        plan1 = correlator.process_signal(sig1)
+        repo.commit_plan(plan1)
 
-        # Close the event
+        # Get the created event and close it
+        e = repo.find_open_event_for_entity(eid, event_type="content_change")
+        assert e is not None
         correlator.close_event(e.id)
 
         # New signal for same entity — should create a NEW event
         sig2 = _sig(id_=2, entity_id=eid, observed_at=_ts(2026, 8, 17, 11), fingerprint="fp-2")
-        e2 = correlator.correlate(sig2)
+        plan2 = correlator.process_signal(sig2)
+        repo.commit_plan(plan2)
 
-        assert e2.id != e.id
+        assert len(plan2.events_to_create) == 1
+        new_evt = repo.find_open_event_for_entity(eid, event_type="content_change")
+        assert new_evt is not None
+        assert new_evt.id != e.id
         signals_in_old = repo.get_event_signals(e.id)
         assert len(signals_in_old) == 1
-        signals_in_new = repo.get_event_signals(e2.id)
+        signals_in_new = repo.get_event_signals(new_evt.id)
         assert len(signals_in_new) == 1
         repo.close()
 
@@ -394,10 +421,17 @@ class TestConfigurableWindow:
         sig1 = _sig(id_=1, entity_id=eid, observed_at=_ts(2026, 8, 17, 10), fingerprint="fp-1")
         sig2 = _sig(id_=2, entity_id=eid, observed_at=_ts(2026, 8, 17, 11, 30), fingerprint="fp-2")
 
-        e1 = correlator.correlate(sig1)
-        e2 = correlator.correlate(sig2)
+        plan1 = correlator.process_signal(sig1)
+        repo.commit_plan(plan1)
+        plan2 = correlator.process_signal(sig2)
+        repo.commit_plan(plan2)
 
-        assert e1.id != e2.id
+        assert len(plan1.events_to_create) == 1
+        assert len(plan2.events_to_create) == 1
+        evts = repo.connection.execute(
+            "SELECT id FROM events WHERE entity_id = ? ORDER BY created_at", (eid,)
+        ).fetchall()
+        assert len(evts) == 2
         repo.close()
 
     def test_invalid_window_raises(self):
@@ -442,8 +476,14 @@ class TestInjectableClock:
         )
 
         sig = _sig(id_=1, entity_id=eid, observed_at=injected, fingerprint="fp-clock")
-        e = correlator.correlate(sig)
-        assert e.created_at == injected
+        plan = correlator.process_signal(sig)
+        repo.commit_plan(plan)
+
+        evts = repo.connection.execute(
+            "SELECT created_at FROM events WHERE entity_id = ?", (eid,)
+        ).fetchall()
+        assert len(evts) == 1
+        assert evts[0]["created_at"] == injected.isoformat()
         repo.close()
 
 
@@ -459,8 +499,14 @@ class TestImportanceDefault:
         eid = _entity_id(repo)
         correlator = EventCorrelator(repository=repo, now_factory=lambda: _ts())
         sig = _sig(id_=1, entity_id=eid, fingerprint="fp-imp")
-        e = correlator.correlate(sig)
-        assert e.importance == Importance.IMPORTANT
+        plan = correlator.process_signal(sig)
+        repo.commit_plan(plan)
+
+        evts = repo.connection.execute(
+            "SELECT importance FROM events WHERE entity_id = ?", (eid,)
+        ).fetchall()
+        assert len(evts) == 1
+        assert evts[0]["importance"] == Importance.IMPORTANT.value
         repo.close()
 
     def test_custom_importance_config(self, tmp_path):
@@ -469,8 +515,14 @@ class TestImportanceDefault:
         config = CorrelationConfig(default_importance="high")
         correlator = EventCorrelator(repository=repo, config=config, now_factory=lambda: _ts())
         sig = _sig(id_=1, entity_id=eid, fingerprint="fp-imp-2")
-        e = correlator.correlate(sig)
-        assert e.importance == Importance.IMPORTANT
+        plan = correlator.process_signal(sig)
+        repo.commit_plan(plan)
+
+        evts = repo.connection.execute(
+            "SELECT importance FROM events WHERE entity_id = ?", (eid,)
+        ).fetchall()
+        assert len(evts) == 1
+        assert evts[0]["importance"] == Importance.IMPORTANT.value
         repo.close()
 
 
@@ -548,17 +600,16 @@ class TestIdempotency:
 
         sig = _sig(id_=1, entity_id=eid, observed_at=_ts(2026, 8, 17, 10), fingerprint="fp-idem")
 
-        e1 = correlator.correlate(sig)
-        e2 = correlator.correlate(sig)
+        plan1 = correlator.process_signal(sig)
+        repo.commit_plan(plan1)
+        plan2 = correlator.process_signal(sig)
+        repo.commit_plan(plan2)
 
-        # Same Event both times — idempotent at the Event level
-        assert e1.id == e2.id
         # Only one Event was ever created
         evts = repo.connection.execute(
             "SELECT COUNT(*) as cnt FROM events WHERE entity_id = ?", (eid,)
         ).fetchone()
         assert evts["cnt"] == 1
-        # No duplicate event
         repo.close()
 
     def test_event_signal_count_is_correct(self, tmp_path):
@@ -571,9 +622,9 @@ class TestIdempotency:
         sig2 = _sig(id_=2, entity_id=eid, observed_at=_ts(2026, 8, 17, 11), fingerprint="fp-b")
         sig3 = _sig(id_=3, entity_id=eid, observed_at=_ts(2026, 8, 17, 11, 30), fingerprint="fp-c")
 
-        correlator.correlate(sig1)
-        correlator.correlate(sig2)
-        correlator.correlate(sig3)
+        for sig in [sig1, sig2, sig3]:
+            plan = correlator.process_signal(sig)
+            repo.commit_plan(plan)
 
         evts = repo.connection.execute(
             "SELECT COUNT(*) as cnt FROM events WHERE entity_id = ?", (eid,)

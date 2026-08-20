@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
 from web_watcher.models import Notification
@@ -46,8 +46,15 @@ class AlertSilencer:
         channel = (notification.channel or "").strip().lower()
         return f"{entity_id}:{event_type}:{channel}"
 
+    def _normalize_now(self, now: Optional[datetime]) -> datetime:
+        if now is None:
+            return datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            return now.replace(tzinfo=timezone.utc)
+        return now.astimezone(timezone.utc)
+
     def should_silence(self, notification: Notification, now: Optional[datetime] = None) -> Tuple[bool, Optional[str]]:
-        now = now or datetime.utcnow()
+        now = self._normalize_now(now)
         key = self._get_key(notification)
         last_time = self._dispatch_history.get(key)
 
@@ -70,7 +77,7 @@ class AlertSilencer:
         return False, None
 
     def record_dispatch(self, notification: Notification, now: Optional[datetime] = None) -> None:
-        now = now or datetime.utcnow()
+        now = self._normalize_now(now)
         key = self._get_key(notification)
         self._dispatch_history[key] = now
 

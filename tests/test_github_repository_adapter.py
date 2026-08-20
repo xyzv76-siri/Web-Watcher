@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import email.utils
 import json
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -10,11 +12,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from urllib.error import HTTPError, URLError
 
-from web_watcher.fetch import FetchRequest, FetchResult
+from web_watcher.fetch import FetchRequest, FetchResult, FetchStatus
 from web_watcher.github_repository_adapter import (
     GitHubRepositoryAdapter,
     _GITHUB_API_BASE,
+    _MAX_RETRY_AFTER_SECONDS,
     _USER_AGENT,
+    _parse_retry_after,
 )
 from web_watcher.snapshots import GitHubRepositorySnapshot
 from web_watcher.targets import WatchTarget
@@ -104,6 +108,16 @@ class TestGitHubRepositorySnapshot:
         assert snap.stars == 0
         assert snap.forks == 0
         assert snap.open_issues == 0
+
+    def test_snapshot_missing_name_and_full_name_defaults_to_empty(self):
+        payload = dict(_SAMPLE_PAYLOAD)
+        del payload["name"]
+        del payload["full_name"]
+        payload.pop("html_url", None)
+        snap = GitHubRepositoryAdapter._snapshot(payload)
+        assert snap.name == ""
+        assert snap.full_name == ""
+        assert snap.html_url == ""
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +324,8 @@ class Test304NotModified:
             last_modified="Mon, 30 Dec 2025 00:00:00 GMT",
         ))
 
-        assert result.success is True
+        assert result.status == FetchStatus.NOT_MODIFIED
+        assert result.success is False
         assert result.status_code == 304
         assert result.content is None
         assert result.etag == "w/\"old-etag\""
@@ -382,92 +397,67 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# Retry logic
+# No internal retry: retry/backoff is owned by FetchPolicy
 # ---------------------------------------------------------------------------
 
 
-class TestRetryLogic:
+class TestNoInternalRetry:
 
     @patch("web_watcher.github_repository_adapter.urlopen")
-    @patch("web_watcher.github_repository_adapter.time")
-    def test_retries_on_429(self, mock_time, mock_urlopen):
+    def test_429_returned_without_internal_retry(self, mock_urlopen):
         _configure_http_error(mock_urlopen, 429, "Too Many Requests")
-        # After 429, return success
-        mock_urlopen.side_effect = [
-            HTTPError(
-                url="https://api.github.com/repos/openai/gpt-4o",
-                code=429, msg="Too Many Requests", hdrs={}, fp=None,
-            ),
-            _MockResponse(status=200, body=_SAMPLE_PAYLOAD),
-        ]
-
-        adapter = GitHubRepositoryAdapter()
-        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
-
-        assert result.success is True
-        assert mock_urlopen.call_count == 2
-        mock_time.sleep.assert_called_once_with(1)
-
-    @patch("web_watcher.github_repository_adapter.urlopen")
-    @patch("web_watcher.github_repository_adapter.time")
-    def test_retries_on_500(self, mock_time, mock_urlopen):
-        err500 = HTTPError(
-            url="https://api.github.com/repos/openai/gpt-4o",
-            code=500, msg="Internal Server Error", hdrs={}, fp=None,
-        )
-        mock_urlopen.side_effect = [
-            err500, err500, _MockResponse(status=200, body=_SAMPLE_PAYLOAD)
-        ]
-
-        adapter = GitHubRepositoryAdapter()
-        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
-
-        assert result.success is True
-        assert mock_urlopen.call_count == 3
-        assert mock_time.sleep.call_count == 2
-
-    @patch("web_watcher.github_repository_adapter.urlopen")
-    @patch("web_watcher.github_repository_adapter.time")
-    def test_exponential_backoff(self, mock_time, mock_urlopen):
-        err503 = HTTPError(
-            url="https://api.github.com/repos/openai/gpt-4o",
-            code=503, msg="Service Unavailable", hdrs={}, fp=None,
-        )
-        # 3 errors → 3 retries (attempt 0..2), then final call raises
-        # with max_retries=3, the code makes 4 urlopen calls total
-        mock_urlopen.side_effect = [err503, err503, err503, err503]
 
         adapter = GitHubRepositoryAdapter()
         result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
 
         assert result.success is False
-        assert mock_time.sleep.call_count == 3
-        calls = [c[0][0] for c in mock_time.sleep.call_args_list]
-        assert calls == [1, 2, 4]
+        assert result.status_code == 429
+        assert mock_urlopen.call_count == 1
 
     @patch("web_watcher.github_repository_adapter.urlopen")
-    @patch("web_watcher.github_repository_adapter.time")
-    def test_does_not_retry_on_404(self, mock_time, mock_urlopen):
+    def test_500_returned_without_internal_retry(self, mock_urlopen):
+        _configure_http_error(mock_urlopen, 500, "Internal Server Error")
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is False
+        assert result.status_code == 500
+        assert mock_urlopen.call_count == 1
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_503_returned_without_internal_retry(self, mock_urlopen):
+        _configure_http_error(mock_urlopen, 503, "Service Unavailable")
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is False
+        assert result.status_code == 503
+        assert mock_urlopen.call_count == 1
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_404_returned_without_internal_retry(self, mock_urlopen):
         _configure_http_error(mock_urlopen, 404, "Not Found")
 
         adapter = GitHubRepositoryAdapter()
-        adapter.fetch_repository(FetchRequest(target=_mk_target()))
-
-        assert mock_urlopen.call_count == 1
-        mock_time.sleep.assert_not_called()
-
-    @patch("web_watcher.github_repository_adapter.urlopen")
-    def test_retries_on_url_error(self, mock_urlopen):
-        mock_urlopen.side_effect = [
-            URLError("connection refused"),
-            _MockResponse(status=200, body=_SAMPLE_PAYLOAD),
-        ]
-
-        adapter = GitHubRepositoryAdapter(sleep=lambda _d: None)
         result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
 
-        assert result.success is True
-        assert mock_urlopen.call_count == 2
+        assert result.success is False
+        assert result.status_code == 404
+        assert mock_urlopen.call_count == 1
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_url_error_returned_without_internal_retry(self, mock_urlopen):
+        _configure_url_error(mock_urlopen)
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is False
+        assert result.status_code is None
+        assert "network error" in result.error
+        assert mock_urlopen.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -486,20 +476,212 @@ class TestConfiguration:
 
         assert mock_urlopen.call_args[1].get("timeout") == 30.0
 
+
+# ---------------------------------------------------------------------------
+# Retry-After parsing (parsing stays in adapter; retry decision moves to FetchPolicy)
+# ---------------------------------------------------------------------------
+
+
+class TestRetryAfter:
+
+    def test_parse_retry_after_seconds(self):
+        assert _parse_retry_after("5") == 5.0
+
+    def test_parse_retry_after_zero(self):
+        assert _parse_retry_after("0") == 0.0
+
+    def test_parse_retry_after_negative(self):
+        assert _parse_retry_after("-1") is None
+
+    def test_parse_retry_after_huge(self):
+        assert _parse_retry_after("999999") == _MAX_RETRY_AFTER_SECONDS
+
+    def test_parse_retry_after_http_date_future(self):
+        future = email.utils.formatdate(
+            time.time() + 120, usegmt=True
+        )
+        parsed = _parse_retry_after(future)
+        assert parsed is not None
+        assert 100 < parsed <= 130
+
+    def test_parse_retry_after_http_date_past(self):
+        past = email.utils.formatdate(
+            time.time() - 120, usegmt=True
+        )
+        assert _parse_retry_after(past) == 0.0
+
+    def test_parse_retry_after_malformed(self):
+        assert _parse_retry_after("not-a-date") is None
+        assert _parse_retry_after("") is None
+        assert _parse_retry_after(None) is None
+
     @patch("web_watcher.github_repository_adapter.urlopen")
-    def test_injectable_sleep(self, mock_urlopen):
-        delays = []
-        err500 = HTTPError(
+    def test_429_retry_after_header_exposed_in_metadata(self, mock_urlopen):
+        _configure_http_error(mock_urlopen, 429, "Too Many Requests")
+        # Simulate Retry-After header on the HTTPError
+        mock_urlopen.side_effect = HTTPError(
             url="https://api.github.com/repos/openai/gpt-4o",
-            code=500, msg="Error", hdrs={}, fp=None,
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "2"},
+            fp=None,
         )
-        # max_retries=2 → 3 urlopen calls (attempt 0,1 retry; attempt 2 raises)
-        mock_urlopen.side_effect = [err500, err500, err500]
 
-        adapter = GitHubRepositoryAdapter(
-            max_retries=2,
-            sleep=lambda d: delays.append(d),
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is False
+        assert result.status_code == 429
+        assert mock_urlopen.call_count == 1
+        assert result.metadata.get("retry_after") == "2"
+# ---------------------------------------------------------------------------
+# Malformed response
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedResponse:
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_malformed_json_returns_error(self, mock_urlopen):
+        class RawResponse:
+            def __init__(self):
+                self.status = 200
+                self.headers = {}
+                self._body = b"{not json}"
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        mock_urlopen.return_value = RawResponse()
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is False
+        assert "malformed JSON" in result.error
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_empty_body_200_returns_error(self, mock_urlopen):
+        class EmptyResponse:
+            def __init__(self):
+                self.status = 200
+                self.headers = {}
+                self._body = b""
+
+            def read(self):
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        mock_urlopen.return_value = EmptyResponse()
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        # Empty body -> json.JSONDecodeError -> malformed JSON response
+        assert result.success is False
+        assert "malformed JSON" in result.error
+
+
+# ---------------------------------------------------------------------------
+# Missing fields
+# ---------------------------------------------------------------------------
+
+
+class TestMissingFields:
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_missing_name_and_full_name(self, mock_urlopen):
+        payload = {
+            "stargazers_count": 100,
+        }
+        mock_urlopen.return_value = _MockResponse(
+            status=200,
+            body=payload,
         )
-        adapter.fetch_repository(FetchRequest(target=_mk_target()))
 
-        assert delays == [1, 2]
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is True
+        content = json.loads(result.content)
+        assert content["name"] == ""
+        assert content["full_name"] == ""
+        assert content["stars"] == 100
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_missing_stargazers_count(self, mock_urlopen):
+        payload = dict(_SAMPLE_PAYLOAD)
+        del payload["stargazers_count"]
+        mock_urlopen.return_value = _MockResponse(
+            status=200,
+            body=payload,
+        )
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is True
+        content = json.loads(result.content)
+        assert content["stars"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-target isolation
+# ---------------------------------------------------------------------------
+
+
+class TestPerTargetIsolation:
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_different_targets_use_different_urls(self, mock_urlopen):
+        _configure_success(mock_urlopen)
+
+        adapter = GitHubRepositoryAdapter()
+        adapter.fetch_repository(FetchRequest(target=_mk_target(locator="openai/gpt-4o")))
+        adapter.fetch_repository(FetchRequest(target=_mk_target(locator="torvalds/linux")))
+
+        urls = [c[0][0].full_url for c in mock_urlopen.call_args_list]
+        assert urls == [
+            "https://api.github.com/repos/openai/gpt-4o",
+            "https://api.github.com/repos/torvalds/linux",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Rate limit headers exposure
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitHeaders:
+
+    @patch("web_watcher.github_repository_adapter.urlopen")
+    def test_rate_limit_headers_exposed_in_metadata(self, mock_urlopen):
+        mock_urlopen.return_value = _MockResponse(
+            status=200,
+            body=_SAMPLE_PAYLOAD,
+            headers={
+                "Content-Type": "application/json",
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": "4999",
+                "X-RateLimit-Reset": str(int(time.time()) + 3600),
+            },
+        )
+
+        adapter = GitHubRepositoryAdapter()
+        result = adapter.fetch_repository(FetchRequest(target=_mk_target()))
+
+        assert result.success is True
+        assert result.metadata.get("rate_limit_limit") == "5000"
+        assert result.metadata.get("rate_limit_remaining") == "4999"
+        assert "rate_limit_reset" in result.metadata

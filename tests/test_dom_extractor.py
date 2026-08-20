@@ -78,3 +78,34 @@ def test_extract_raw_text():
     assert res.status == ExtractionStatus.FOUND
     assert "Product Pricing" in res.value
     assert "Pro Plan" in res.value
+
+
+MULTI_HTML_DOC = """
+<!DOCTYPE html>
+<html>
+<body>
+    <div class="item">First</div>
+    <div class="item">Second</div>
+    <div class="item">Third</div>
+</body>
+</html>
+"""
+
+
+def test_extract_multiple_css_matches_returns_multiple_match():
+    cfg = ExtractorConfig(name="items", selector_type="css", selector="div.item")
+    res = DOMExtractor.extract(MULTI_HTML_DOC, cfg)
+    assert res.status == ExtractionStatus.MULTIPLE_MATCH
+    assert res.metadata["match_count"] == 3
+    assert res.value is None
+    assert "matched 3 elements" in res.error_message
+
+
+def test_extract_multiple_css_matches_does_not_auto_select_first():
+    cfg = ExtractorConfig(name="items", selector_type="css", selector="div.item")
+    res = DOMExtractor.extract(MULTI_HTML_DOC, cfg)
+    assert res.status == ExtractionStatus.MULTIPLE_MATCH
+    assert res.value is None
+    assert "First" not in str(res.value)
+    assert "Second" not in str(res.value)
+    assert "Third" not in str(res.value)

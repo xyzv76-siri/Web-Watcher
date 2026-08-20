@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 from web_watcher.models import Notification
 from web_watcher.alert_silencer import AlertSilencer, SilencingRule
@@ -12,7 +12,7 @@ def _make_notification(entity_id="page_pricing", event_type="dom_diff", channel=
         event_id=202,
         channel=channel,
         status="pending",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         payload={
             "entity_id": entity_id,
             "event_type": event_type,
@@ -33,7 +33,7 @@ def test_first_notification_not_silenced():
 def test_subsequent_notification_within_window_silenced():
     silencer = AlertSilencer(default_cooldown_seconds=300)
     ntf = _make_notification()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     silencer.record_dispatch(ntf, now=now)
     silenced, reason = silencer.should_silence(ntf, now=now + timedelta(seconds=60))
@@ -45,7 +45,7 @@ def test_subsequent_notification_within_window_silenced():
 def test_notification_after_cooldown_allowed():
     silencer = AlertSilencer(default_cooldown_seconds=300)
     ntf = _make_notification()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     silencer.record_dispatch(ntf, now=now)
     silenced, _ = silencer.should_silence(ntf, now=now + timedelta(seconds=301))
@@ -57,7 +57,7 @@ def test_different_entities_isolated():
     silencer = AlertSilencer(default_cooldown_seconds=300)
     ntf1 = _make_notification(entity_id="page_pricing")
     ntf2 = _make_notification(entity_id="page_terms")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     silencer.record_dispatch(ntf1, now=now)
     silenced, _ = silencer.should_silence(ntf2, now=now + timedelta(seconds=30))
@@ -69,7 +69,7 @@ def test_different_channels_isolated():
     silencer = AlertSilencer(default_cooldown_seconds=300)
     ntf_slack = _make_notification(channel="slack")
     ntf_lark = _make_notification(channel="lark")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     silencer.record_dispatch(ntf_slack, now=now)
     silenced, _ = silencer.should_silence(ntf_lark, now=now + timedelta(seconds=30))
@@ -83,7 +83,7 @@ def test_custom_silencing_rule_matches():
     silencer.add_rule(rule)
 
     ntf = _make_notification(entity_id="page_quick")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     silencer.record_dispatch(ntf, now=now)
     # 30 秒内被静音
@@ -108,7 +108,7 @@ def test_dispatcher_suppresses_silenced_notification():
     )
 
     ntf = _make_notification()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     silencer.record_dispatch(ntf, now=now)
 
     # 60 秒内应被静默

@@ -40,13 +40,14 @@ from web_watcher.investigation_evidence import (
     Evidence,
     EvidenceType,
 )
-from web_watcher.investigation_tools import (
+from web_watcher.investigation_tools import ToolResult
+
+from tests.mock_investigation_tools import (
     MOCK_EVIDENCE_TIME,
     MockHistoricalLookupTool,
     MockPageParseTool,
     MockWebFetchTool,
     MockWebSearchTool,
-    ToolResult,
 )
 
 
@@ -478,7 +479,7 @@ class TestNoToolChaining:
 
         Verified by checking the AST of the execute() method."""
         import ast
-        import web_watcher.investigation_tools as mod
+        import tests.mock_investigation_tools as mod
 
         source = inspect_source(mod)
         tree = ast.parse(source)
@@ -502,7 +503,7 @@ class TestNoToolChaining:
 
     def test_search_execute_does_not_call_other_tools(self) -> None:
         import ast
-        import web_watcher.investigation_tools as mod
+        import tests.mock_investigation_tools as mod
 
         source = inspect_source(mod)
         tree = ast.parse(source)
@@ -526,7 +527,7 @@ class TestNoToolChaining:
 
     def test_parse_execute_does_not_call_other_tools(self) -> None:
         import ast
-        import web_watcher.investigation_tools as mod
+        import tests.mock_investigation_tools as mod
 
         source = inspect_source(mod)
         tree = ast.parse(source)
@@ -550,7 +551,7 @@ class TestNoToolChaining:
 
     def test_history_execute_does_not_call_other_tools(self) -> None:
         import ast
-        import web_watcher.investigation_tools as mod
+        import tests.mock_investigation_tools as mod
 
         source = inspect_source(mod)
         tree = ast.parse(source)
@@ -594,7 +595,7 @@ class TestStructuralNoForbiddenImports:
 
     @pytest.fixture
     def source(self) -> str:
-        import web_watcher.investigation_tools as mod
+        import tests.mock_investigation_tools as mod
 
         return inspect_source(mod)
 

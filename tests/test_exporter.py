@@ -3,7 +3,7 @@
 import os
 from io import StringIO
 from unittest.mock import MagicMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from web_watcher.exporter import AuditExporter, parse_since
@@ -19,8 +19,8 @@ def _make_event(event_id=1, entity_id=1, event_type=EventType.CONTENT_CHANGE, st
         event_type=event_type,
         status=status,
         importance=importance,
-        created_at=created_at or datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=created_at or datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
 
 
@@ -30,7 +30,7 @@ def _make_notification(notif_id=1, event_id=1, channel="webhook", status="pendin
         event_id=event_id,
         channel=channel,
         status=status,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         payload=payload or {},
     )
 
@@ -43,32 +43,32 @@ class TestParseSince:
         assert parse_since("") is None
 
     def test_seconds(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = parse_since("30s")
         assert now - timedelta(seconds=30) <= result <= now
 
     def test_minutes(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = parse_since("15m")
         assert now - timedelta(minutes=15) <= result <= now
 
     def test_hours(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = parse_since("2h")
         assert now - timedelta(hours=2) <= result <= now
 
     def test_days(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = parse_since("7d")
         assert now - timedelta(days=7) <= result <= now
 
     def test_iso_format(self):
-        dt = datetime(2024, 1, 1, 12, 0, 0)
+        dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         result = parse_since("2024-01-01T12:00:00")
         assert result == dt
 
     def test_invalid_falls_back_to_24h(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         result = parse_since("invalid")
         assert now - timedelta(hours=24) <= result <= now
 
@@ -88,13 +88,13 @@ class TestAuditExporter:
 
     def test_collect_data_filters_by_since(self):
         repo = MagicMock()
-        old_event = _make_event(created_at=datetime.utcnow() - timedelta(days=2))
-        new_event = _make_event(created_at=datetime.utcnow() - timedelta(hours=1))
+        old_event = _make_event(created_at=datetime.now(timezone.utc) - timedelta(days=2))
+        new_event = _make_event(created_at=datetime.now(timezone.utc) - timedelta(hours=1))
         repo.list_events.return_value = [old_event, new_event]
         repo.list_all_notifications.return_value = []
 
         exporter = AuditExporter(repo)
-        since = datetime.utcnow() - timedelta(hours=2)
+        since = datetime.now(timezone.utc) - timedelta(hours=2)
         data = exporter.collect_data(since=since)
 
         assert len(data["events"]) == 1
@@ -102,7 +102,7 @@ class TestAuditExporter:
 
     def test_export_markdown_contains_events(self):
         repo = MagicMock()
-        ev = _make_event(event_id=1, created_at=datetime.utcnow())
+        ev = _make_event(event_id=1, created_at=datetime.now(timezone.utc))
         notif = _make_notification(event_id=1, channel="slack", status="delivered")
         repo.list_events.return_value = [ev]
         repo.list_all_notifications.return_value = [notif]
@@ -127,7 +127,7 @@ class TestAuditExporter:
 
     def test_export_html_structure(self):
         repo = MagicMock()
-        ev = _make_event(event_id=1, created_at=datetime.utcnow())
+        ev = _make_event(event_id=1, created_at=datetime.now(timezone.utc))
         repo.list_events.return_value = [ev]
         repo.list_all_notifications.return_value = []
 
@@ -153,7 +153,7 @@ class TestAuditExporter:
 class TestCliExport:
     def test_export_markdown_to_stdout(self, monkeypatch, capsys):
         repo = MagicMock()
-        ev = _make_event(event_id=1, created_at=datetime.utcnow())
+        ev = _make_event(event_id=1, created_at=datetime.now(timezone.utc))
         repo.list_events.return_value = [ev]
         repo.list_all_notifications.return_value = []
 
