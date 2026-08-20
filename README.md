@@ -214,4 +214,4 @@ docker compose exec web-watcher python -m web_watcher.cli doctor
 
 ## 许可证
 
-许可证信息将在仓库许可证文件最终确定后添加。
+MIT License. See [LICENSE](LICENSE) for details.
