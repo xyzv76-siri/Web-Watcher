@@ -359,15 +359,24 @@ class GitHubTarget:
             if release_eval.new_status == TargetStatus.COOLDOWN or repo_eval.new_status == TargetStatus.COOLDOWN:
                 observed_status = TargetStatus.COOLDOWN
                 observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+                observed_next_allowed_at = max(
+                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                )
             elif release_eval.new_status == TargetStatus.BACKOFF or repo_eval.new_status == TargetStatus.BACKOFF:
                 observed_status = TargetStatus.BACKOFF
                 observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+                observed_next_allowed_at = max(
+                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                )
             else:
                 observed_status = TargetStatus.NORMAL
                 observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+                observed_next_allowed_at = max(
+                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
+                )
         elif release_eval:
             observed_status = release_eval.new_status
             observed_consecutive_failures = release_eval.consecutive_failures
