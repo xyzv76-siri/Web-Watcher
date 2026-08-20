@@ -2,7 +2,7 @@
 
 **项目**: web-watcher
 **日期**: 2026-08-20
-**状态**: GA CANDIDATE（待最终十问验证）
+**状态**: GA ACCEPT
 **全量测试**: 1372 passed / 0 failed
 **Git**: 干净，无未提交工作
 **Branch**: audit/global-architecture-snapshot-20260819（与 origin 同步）
@@ -97,13 +97,18 @@
 |------|----------|------|
 | retry 机制 | PASS | `notification_dispatcher.py:134-168` `max_retries` + `base_backoff_sec * (2 ** (retries - 1))` |
 | 状态持久化 | PASS | `finalize_notification_dispatch()` / `update_notification_status()` 持久化 `delivered` / `failed` / `retry_pending` |
-| 幂等性 | PASS | `dispatch_token` + `finalize_notification_dispatch()` fencing；重复 dispatch 不会重复投递 |
+| 幂等性 | PASS | `dispatch_token` + `finalize_notification_dispatch()` fencing；重复 dispatch 不会重复投递同一 claimed 通知 |
 | 抑制/静音 | PASS | `AlertSilencer.should_silence()` 在发送前拦截；suppressed 状态持久化 |
-| at-least-once 声明 | PARTIAL | 代码实现 at-least-once retry，但**无显式文档字符串或注释声明 "at-least-once semantics"**；建议在 `NotificationDispatcher` 类文档中补充 |
+| at-least-once 声明 | PASS | `NotificationDispatcher` 类 docstring 已明确声明 at-least-once external delivery，并说明 crash 后可能重复投递 |
 
 **关键代码路径**:
 - `notification_dispatcher.py:97-168` `dispatch_one()` — retry + backoff + fencing
-- `notification_dispatcher.py:189-198` `fetch_pending()` — `claim_notifications()` 带 fencing
+- `notification_dispatcher.py:189-198` `fetch_pending()` — `claim_notifications()` fencing
+
+**语义澄清**:
+- Database-side fencing 防止 stale workers 篡改/释放不属于自己的 lease。
+- 外部发送与数据库 finalization 之间不是 exactly-once：若外部渠道已接受但进程在 DB finalize 前 crash，另一个 worker 可能再次发送相同通知。
+- 因此正确语义是：**at-least-once external delivery**，不是 exactly-once。
 
 ### 8. Docker 生产入口是否完整
 
@@ -309,7 +314,6 @@
 | 无 `schema_version` 表 | P1 | 当前 `CREATE TABLE IF NOT EXISTS` 足够；未来 migration 需要 |
 | CLI worker 缺少 graceful shutdown | P1 | `docker_run.py` 已有；CLI 子命令未统一 |
 | `NotificationStatus` 未使用强类型 Enum | P1 | 当前字符串工作；建议迁移 |
-| Notification at-least-once 文档声明缺失 | P2 | 代码已实现；建议在类文档中显式声明 |
 
 ---
 
@@ -323,14 +327,16 @@
 | **crash recovery** | ✅ PASS — lease 过期 + reap + 状态持久化 |
 | **Target ↔ Host 两层状态冲突** | ✅ PASS — 分层检查，无隐藏共享状态 |
 | **Host authority 统一** | ✅ PASS — GenericWeb / GitHub / Scheduler 共享同一 `HostRateLimiter` |
-| **Notification at-least-once** | ⚠️ PARTIAL — 代码实现完整，文档声明缺失 |
+| **Notification at-least-once** | ✅ PASS — 代码实现 + 类 docstring 已明确声明 at-least-once external delivery |
 | **Docker 生产入口** | ✅ PASS — 完整镜像 + entrypoint + graceful shutdown |
 | **12 Part 覆盖** | ✅ PASS — 无遗漏、无覆盖、边界清晰 |
 | **GA 十问** | ✅ 10/10 可回答 |
 | **全量测试** | ✅ 1372 passed / 0 failed |
 | **Git 状态** | ✅ 干净，无未提交工作 |
 
-**最终状态**: **GA CANDIDATE** — 所有技术验证通过，仅待 Notification at-least-once 语义补充文档声明后即可升级为 **GA ACCEPT**。
+**最终状态**: **GA ACCEPT**
+
+所有技术验证通过，报告状态已统一。代码层面无新的 P0，文档层面已补全 Notification at-least-once 语义声明。
 
 ---
 

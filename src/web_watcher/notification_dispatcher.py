@@ -17,7 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 class NotificationDispatcher:
-    """Dispatches pending notifications across registered channel senders with retry backoff."""
+    """Dispatches pending notifications across registered channel senders with retry backoff.
+
+    Delivery semantics: at-least-once external delivery.
+    - Pending notifications are claimed via DB-level fencing (``claim_notifications``) so that
+      stale workers cannot finalize another worker's lease.
+    - Each claimed notification is sent through the configured channel sender.
+    - After external acceptance, the dispatch result is finalized in the database
+      (``finalize_notification_dispatch`` / ``update_notification_status``).
+    - If the process crashes after the external channel has accepted the message but
+      before DB finalization completes, the notification may be sent again when another
+      worker claims it. Therefore the external delivery contract is at-least-once, not
+      exactly-once.
+    - Retries use exponential backoff up to ``max_retries``; exhausted retries are marked
+      ``failed``. Silenced notifications are recorded as ``suppressed``.
+    """
 
     def __init__(
         self,
