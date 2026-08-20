@@ -398,6 +398,22 @@ class TestNegativeCases:
         assert result.observation.status == ObservationStatus.EXTRACTION_FAILURE
         assert len(result.signals_emitted) == 0
 
+    def test_partial_selector_failure_does_not_emit_signal(self):
+        html = "<html><body><div class='price'>$10.00</div></body></html>"
+        extractors = [
+            ExtractorConfig(name="price", selector_type="css", selector=".price"),
+            ExtractorConfig(name="missing", selector_type="css", selector=".missing"),
+        ]
+        previous_values = {
+            "price": "10.00",
+            "missing": "old",
+        }
+        target = _make_target(metadata={"initialized": True, "normalized_values": previous_values})
+        result = _run_execute(html, target=target, extractors=extractors)
+        assert result.observation.status == ObservationStatus.EXTRACTION_FAILURE
+        assert len(result.signals_emitted) == 0
+        assert "Partial selector failure" in result.observation.reason
+
     def test_first_observation_never_emits_signal(self):
         result = _run_execute(HTML_A)
         assert len(result.signals_emitted) == 0
