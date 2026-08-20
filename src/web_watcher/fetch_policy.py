@@ -184,7 +184,7 @@ class FetchPolicy:
         # A. 304 Not Modified: 协商缓存命中，直接短路
         if status_code == 304:
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=304,
@@ -201,7 +201,7 @@ class FetchPolicy:
         if status_code in (301, 302, 303, 307, 308):
             redirect_url = (headers_map.get("location") or "").strip()
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             if status_code == 301 and redirect_url:
                 # Permanent redirect: update target URL
                 return FetchEvaluation(
@@ -232,7 +232,7 @@ class FetchPolicy:
             res_etag = headers_map.get("etag") or target.etag
             res_last_mod = headers_map.get("last-modified") or target.last_modified
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=status_code,
@@ -267,7 +267,6 @@ class FetchPolicy:
             if failures >= self.max_consecutive_failures or target.status in (TargetStatus.COOLDOWN, TargetStatus.RECOVERING):
                 cd_sec = self.cooldown_ladder[0]
                 next_allowed = now_dt + timedelta(seconds=cd_sec)
-                self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
                 return FetchEvaluation(
                     target_id=target.id,
                     status_code=404,
@@ -281,7 +280,6 @@ class FetchPolicy:
             jitter = _deterministic_jitter(target.id, failures, status_code, raw_backoff, self.jitter_ratio)
             delay = max(1.0, raw_backoff + jitter)
             next_allowed = now_dt + timedelta(seconds=delay)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=404,
@@ -351,7 +349,6 @@ class FetchPolicy:
                 ladder_idx = min(max(0, failures - self.max_consecutive_failures), len(self.cooldown_ladder) - 1)
                 cd_sec = self.cooldown_ladder[ladder_idx]
                 next_allowed = now_dt + timedelta(seconds=cd_sec)
-                self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
                 return FetchEvaluation(
                     target_id=target.id,
                     status_code=status_code,
@@ -365,7 +362,6 @@ class FetchPolicy:
             jitter = _deterministic_jitter(target.id, failures, status_code, raw_backoff, self.jitter_ratio)
             delay = max(1.0, raw_backoff + jitter)
             next_allowed = now_dt + timedelta(seconds=delay)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=status_code,
@@ -382,7 +378,6 @@ class FetchPolicy:
             ladder_idx = min(max(0, failures - self.max_consecutive_failures), len(self.cooldown_ladder) - 1)
             cd_sec = self.cooldown_ladder[ladder_idx]
             next_allowed = now_dt + timedelta(seconds=cd_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=status_code,
@@ -396,7 +391,6 @@ class FetchPolicy:
         jitter = _deterministic_jitter(target.id, failures, status_code, raw_backoff, self.jitter_ratio)
         delay = max(1.0, raw_backoff + jitter)
         next_allowed = now_dt + timedelta(seconds=delay)
-        self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
         return FetchEvaluation(
             target_id=target.id,
             status_code=status_code,

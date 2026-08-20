@@ -56,7 +56,11 @@ class ScheduledRunner:
         self.repo = repo
         self.rules_path = rules_path or os.getenv("WEB_WATCHER_RULES") or getattr(self.config, "rules_path", None)
         self.fetcher = fetcher or SmartFetcher(default_timeout=getattr(self.config, "default_timeout", 10.0))
-        self.policy = policy or FetchPolicy()
+        host_limiter = None
+        if repo is not None and policy is None:
+            from web_watcher.host_rate_limiter import HostRateLimiter
+            host_limiter = HostRateLimiter(repository=repo)
+        self.policy = policy or FetchPolicy(host_rate_limiter=host_limiter)
         self._rule_cache: Dict[str, WatcherRule] = {}
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.metrics = metrics

@@ -188,9 +188,6 @@ class GitHubTarget:
 
             rel_etag = meta.get("release_etag")
             res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
-            if rel_host and policy.host_rate_limiter:
-                next_allowed = now + timedelta(seconds=1) if res.status_code and res.status_code < 400 else now + timedelta(seconds=60)
-                policy.host_rate_limiter.update_after_response(rel_host, next_allowed)
 
             headers_map = {}
             if isinstance(res.metadata, dict):
@@ -276,9 +273,6 @@ class GitHubTarget:
 
             repo_etag = meta.get("repo_etag")
             res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
-            if repo_host and policy.host_rate_limiter:
-                next_allowed = now + timedelta(seconds=1) if res.status_code and res.status_code < 400 else now + timedelta(seconds=60)
-                policy.host_rate_limiter.update_after_response(repo_host, next_allowed)
 
             headers_map = {}
             if isinstance(res.metadata, dict):
