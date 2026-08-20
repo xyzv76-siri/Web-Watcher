@@ -104,13 +104,18 @@ class GenericWebTarget:
         headers_to_send = dict(self.custom_headers)
         headers_to_send.update(decision.headers)
 
-        fetch_res: FetchResult = fetcher.fetch(
-            url=self.target.url,
-            custom_headers=headers_to_send,
-            etag=self.target.etag,
-            last_modified=self.target.last_modified,
-            timeout=self.timeout,
-        )
+        try:
+            fetch_res: FetchResult = fetcher.fetch(
+                url=self.target.url,
+                custom_headers=headers_to_send,
+                etag=self.target.etag,
+                last_modified=self.target.last_modified,
+                timeout=self.timeout,
+            )
+        finally:
+            # Release host claim after fetch completes (success or failure)
+            if decision.host and policy.host_rate_limiter:
+                policy.host_rate_limiter.release_request(decision.host)
 
         # 3. Policy post-evaluation
         headers_dict = {}
@@ -274,6 +279,7 @@ class GenericWebTarget:
 
         any_changed = any(d.changed for d in diffs.values())
         all_extractors_failed = bool(self.extractors) and all(not v.is_found for v in extracted_results.values())
+        any_extractor_failed = bool(self.extractors) and any(not v.is_found for v in extracted_results.values())
 
         if is_first_observation:
             observation_status = ObservationStatus.FIRST_OBSERVATION
@@ -283,6 +289,12 @@ class GenericWebTarget:
             observation_status = ObservationStatus.EXTRACTION_FAILURE
             should_emit_signal = False
             emit_reason = "All extractors failed; potential selector or content change"
+        elif any_extractor_failed and not all_extractors_failed:
+            # Partial selector failure: treat as extraction failure, not content change.
+            # Selector disappearance ≠ business deletion.
+            observation_status = ObservationStatus.EXTRACTION_FAILURE
+            should_emit_signal = False
+            emit_reason = "Partial selector failure; cannot confirm content change"
         elif any_changed:
             # Apply false positive guard before emitting a signal.
             suppress, guard_reason = self.false_positive_guard.should_suppress_signal(

@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import tempfile
+import os
 import pytest
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import (
@@ -7,6 +9,7 @@ from web_watcher.fetch_policy import (
     parse_retry_after,
     parse_interval_seconds,
 )
+from web_watcher.repository import Repository
 
 
 def test_parse_interval_seconds():
@@ -442,47 +445,50 @@ def test_retry_after_is_effective_floor():
 
 
 def test_host_rate_limiter_blocks_shared_host():
-    limiter = HostRateLimiter()
+    repo, limiter, _ = _make_repo_host_limiter()
     now = datetime.now(timezone.utc)
-    assert limiter.prepare_request("example.com", now) == (True, None, None)
+    allowed, claim_token, _, _ = limiter.prepare_request("example.com", now)
+    assert allowed is True
+    assert claim_token is not None
 
     # Simulate a 403 cooldown for example.com
     limiter.update_after_response("example.com", now + timedelta(seconds=120))
-    allowed, remaining, reason = limiter.prepare_request("example.com", now)
+    allowed, _, remaining, _ = limiter.prepare_request("example.com", now)
     assert allowed is False
     assert remaining is not None
     assert remaining > 110
 
 
 def test_host_rate_limiter_independent_hosts():
-    limiter = HostRateLimiter()
+    repo, limiter, _ = _make_repo_host_limiter()
     now = datetime.now(timezone.utc)
     limiter.update_after_response("a.example.com", now + timedelta(seconds=120))
-    allowed, _, _ = limiter.prepare_request("b.example.com", now)
+    allowed, _, _, _ = limiter.prepare_request("b.example.com", now)
     assert allowed is True
 
 
 def test_host_rate_limiter_most_restrictive_wins():
-    limiter = HostRateLimiter()
+    repo, limiter, _ = _make_repo_host_limiter()
     now = datetime.now(timezone.utc)
     limiter.update_after_response("example.com", now + timedelta(seconds=60))
     limiter.update_after_response("example.com", now + timedelta(seconds=180))
-    allowed, remaining, _ = limiter.prepare_request("example.com", now)
+    allowed, _, remaining, _ = limiter.prepare_request("example.com", now)
     assert allowed is False
     assert 175 <= remaining <= 185
 
 
 def test_host_rate_limiter_expiry_allows_request():
-    limiter = HostRateLimiter()
+    repo, limiter, _ = _make_repo_host_limiter()
     now = datetime.now(timezone.utc)
     limiter.update_after_response("example.com", now + timedelta(seconds=5))
     future = now + timedelta(seconds=10)
-    allowed, _, _ = limiter.prepare_request("example.com", future)
+    allowed, _, _, _ = limiter.prepare_request("example.com", future)
     assert allowed is True
 
 
 def test_prepare_request_blocks_shared_host_via_policy():
-    policy = FetchPolicy()
+    repo, limiter, _ = _make_repo_host_limiter()
+    policy = FetchPolicy(host_rate_limiter=limiter)
     now = datetime.now(timezone.utc)
     t_a = Target(id="t-a", url="https://example.com/a", consecutive_failures=0)
     t_b = Target(id="t-b", url="https://example.com/b", consecutive_failures=0)
@@ -495,3 +501,10 @@ def test_prepare_request_blocks_shared_host_via_policy():
     decision = policy.prepare_request(t_b, now=now)
     assert decision.allowed is False
     assert "Host 'example.com'" in (decision.reason or "")
+
+def _make_repo_host_limiter():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    repo = Repository(path)
+    limiter = HostRateLimiter(repository=repo)
+    return repo, limiter, path

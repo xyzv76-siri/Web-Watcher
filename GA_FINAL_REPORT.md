@@ -136,6 +136,8 @@ The web-watcher system has completed all remediation phases and is cleared for G
 - Fallback to legacy `update_notification_status()` for unclaimed notifications
 - Added 9 new tests covering claim, release, finalize, duplicate prevention, worker isolation
 
+**Semantic clarification:** The system provides **at-least-once external delivery** combined with **fenced persistence**. Database fencing guarantees that only one worker can finalize a notification's state, preventing duplicate database records. However, if a worker crashes after the external side-effect (e.g., Telegram message sent) but before `finalize_notification_dispatch()`, a stale-lease recovery worker may resend the notification. True exactly-once delivery would require idempotency keys supported by the external notification channel.
+
 ### FR-05: Schema Versioning, Migration & Explicit Redirect Policy
 **Problem:** No formal schema version tracking; 301/302 redirects not represented in policy layer.  
 **Solution:**

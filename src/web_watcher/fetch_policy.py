@@ -79,6 +79,8 @@ class FetchDecision:
     headers: Dict[str, str] = field(default_factory=dict)
     delay_seconds: float = 0.0
     reason: Optional[str] = None
+    claim_token: Optional[str] = None
+    host: Optional[str] = None
 
 
 @dataclass
@@ -132,13 +134,15 @@ class FetchPolicy:
 
         # 2. 检查 host-level rate limit
         host = _extract_host(target.url)
+        claim_token = None
         if host:
-            allowed, remaining, reason = self.host_rate_limiter.prepare_request(host, now_dt)
+            allowed, claim_token, remaining, reason = self.host_rate_limiter.prepare_request(host, now_dt)
             if not allowed:
                 return FetchDecision(
                     allowed=False,
                     delay_seconds=remaining or 0.0,
                     reason=reason or f"Host '{host}' rate-limited",
+                    host=host,
                 )
 
         # 3. 组装协商缓存头（per-target）
@@ -153,6 +157,8 @@ class FetchPolicy:
             allowed=True,
             headers=headers,
             reason=f"Target '{target.id}' ready for fetch (status: {status_val})",
+            claim_token=claim_token,
+            host=host,
         )
 
     def evaluate_response(

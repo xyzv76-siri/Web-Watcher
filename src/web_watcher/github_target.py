@@ -3,7 +3,7 @@ import re
 import json
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy, FetchDecision, FetchEvaluation
@@ -11,6 +11,7 @@ from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch import FetchStatus
 from web_watcher.execution_semantics import ExecutionOutcome, transition_for
 from web_watcher.signal_types import SignalType
+from web_watcher.host_rate_limiter import _extract_host
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -166,8 +167,30 @@ class GitHubTarget:
         # 2. 检查 Releases
         if "releases" in self.watch_types:
             rel_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/releases/latest"
+            rel_host = _extract_host(rel_url)
+            if rel_host and policy.host_rate_limiter:
+                allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(rel_host, now)
+                if not allowed:
+                    return GitHubTargetExecutionResult(
+                        target_id=self.target.id,
+                        allowed=False,
+                        status_code=None,
+                        new_status=self.target.status,
+                        signals_emitted=[],
+                        reason=f"Host '{rel_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                        outcome=ExecutionOutcome.POLICY_BLOCKED,
+                        transition=transition_for(
+                            ExecutionOutcome.POLICY_BLOCKED,
+                            target=self.target,
+                            now=now,
+                        ),
+                    )
+
             rel_etag = meta.get("release_etag")
             res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
+            if rel_host and policy.host_rate_limiter:
+                next_allowed = now + timedelta(seconds=1) if res.status_code and res.status_code < 400 else now + timedelta(seconds=60)
+                policy.host_rate_limiter.update_after_response(rel_host, next_allowed)
 
             headers_map = {}
             if isinstance(res.metadata, dict):
@@ -232,8 +255,30 @@ class GitHubTarget:
         # 3. 检查 Repo Meta (Stars)
         if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL:
             repo_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}"
+            repo_host = _extract_host(repo_url)
+            if repo_host and policy.host_rate_limiter:
+                allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(repo_host, now)
+                if not allowed:
+                    return GitHubTargetExecutionResult(
+                        target_id=self.target.id,
+                        allowed=False,
+                        status_code=None,
+                        new_status=self.target.status,
+                        signals_emitted=[],
+                        reason=f"Host '{repo_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                        outcome=ExecutionOutcome.POLICY_BLOCKED,
+                        transition=transition_for(
+                            ExecutionOutcome.POLICY_BLOCKED,
+                            target=self.target,
+                            now=now,
+                        ),
+                    )
+
             repo_etag = meta.get("repo_etag")
             res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
+            if repo_host and policy.host_rate_limiter:
+                next_allowed = now + timedelta(seconds=1) if res.status_code and res.status_code < 400 else now + timedelta(seconds=60)
+                policy.host_rate_limiter.update_after_response(repo_host, next_allowed)
 
             headers_map = {}
             if isinstance(res.metadata, dict):

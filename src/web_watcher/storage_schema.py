@@ -93,6 +93,13 @@ CREATE TABLE IF NOT EXISTS fetch_state (
     fetched_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS host_rate_limits (
+    host TEXT PRIMARY KEY,
+    next_allowed_at TEXT,
+    claim_token TEXT,
+    claimed_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_entity
     ON signals(entity_id);
 

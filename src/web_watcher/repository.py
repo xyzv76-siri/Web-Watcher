@@ -5,7 +5,7 @@ import logging
 import sqlite3
 
 from datetime import datetime, timezone
-from typing import Optional, Union, Dict, List, Any
+from typing import Optional, Union, Dict, List, Any, Tuple
 
 from .models import Entity, Event, FetchState, Notification, Signal
 from .storage import initialize_schema, open_database
@@ -175,7 +175,7 @@ def _deserialize_importance(val: str) -> Importance:
         return Importance.INTERESTING
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Repository:
@@ -211,6 +211,8 @@ class Repository:
     def _apply_migration(self, version: int) -> None:
         if version == 1:
             self._init_notification_table()
+        if version == 2:
+            self._init_host_rate_limit_table()
         # Future migrations go here
 
     def create_entity(
@@ -1060,6 +1062,94 @@ class Repository:
             )
         """)
         self.connection.commit()
+
+    def _init_host_rate_limit_table(self):
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS host_rate_limits (
+                host TEXT PRIMARY KEY,
+                next_allowed_at TEXT,
+                claim_token TEXT,
+                claimed_at TEXT
+            )
+        """)
+        self.connection.commit()
+
+    def acquire_host_request(
+        self,
+        host: str,
+        now: datetime,
+        lease_seconds: float = 300.0,
+    ) -> Tuple[bool, Optional[str], Optional[float]]:
+        """
+        Atomically acquire permission to send an HTTP request to a host.
+        Uses a claim_token lease to prevent concurrent requests to the same host.
+        Returns (allowed, claim_token, wait_seconds).
+        """
+        import uuid
+        from datetime import timedelta, timezone
+
+        if not host:
+            return True, None, None
+
+        now_dt = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+        claim_token = str(uuid.uuid4())
+
+        with self.connection:
+            cursor = self.connection.cursor()
+            # Try to acquire: update existing row only if next_allowed_at has passed
+            cursor.execute("""
+                UPDATE host_rate_limits
+                SET claim_token = ?, claimed_at = ?
+                WHERE host = ? AND (next_allowed_at IS NULL OR next_allowed_at <= ?)
+            """, (claim_token, now_iso, host, now_iso))
+
+            if cursor.rowcount:
+                return True, claim_token, None
+
+            # Row exists but next_allowed_at is in the future
+            row = cursor.execute("""
+                SELECT next_allowed_at FROM host_rate_limits WHERE host = ?
+            """, (host,)).fetchone()
+            if row and row["next_allowed_at"]:
+                try:
+                    next_allowed = datetime.fromisoformat(row["next_allowed_at"])
+                    remaining = max(0.0, (next_allowed - now_dt).total_seconds())
+                    return False, None, remaining
+                except ValueError:
+                    pass
+
+            # No row exists, insert one
+            cursor.execute("""
+                INSERT INTO host_rate_limits (host, claim_token, claimed_at)
+                VALUES (?, ?, ?)
+            """, (host, claim_token, now_iso))
+            return True, claim_token, None
+
+    def release_host_request(self, host: str, claim_token: str) -> bool:
+        """Release a host request claim if the token matches."""
+        with self.connection:
+            cursor = self.connection.execute("""
+                UPDATE host_rate_limits
+                SET claim_token = NULL, claimed_at = NULL
+                WHERE host = ? AND claim_token = ?
+            """, (host, claim_token))
+            return cursor.rowcount > 0
+
+    def update_host_next_allowed(self, host: str, next_allowed_at: Optional[datetime]) -> None:
+        """Update the next allowed time for a host."""
+        if not host:
+            return
+        now_iso = utc_now_iso()
+        next_allowed_iso = _serialize_datetime(next_allowed_at)
+        with self.connection:
+            self.connection.execute("""
+                INSERT INTO host_rate_limits (host, next_allowed_at, claimed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(host) DO UPDATE SET
+                    next_allowed_at = excluded.next_allowed_at,
+                    claimed_at = excluded.claimed_at
+            """, (host, next_allowed_iso, now_iso))
 
     def save_target(self, target: Any) -> None:
         self._init_target_table()
