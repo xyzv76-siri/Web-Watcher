@@ -286,228 +286,60 @@ pytest -q
 
 ### Open Source Scope
 
-Web-Watcher is an open source software project.
+本仓库公开的是 Web-Watcher 的可复用软件实现、测试代码、公开文档、配置模板以及相关工程组件。
 
-This repository publicly releases Web-Watcher's reusable software implementation, test code, public documentation, configuration templates, and related engineering components for code review, development, testing, deployment, and secondary development.
+开源仓库与实际生产环境保持明确隔离。
 
-The open source repository maintains a clear separation from the actual production environment.
+**可以公开：** 源代码、测试、公开文档、配置模板、Schema、示例数据、CI/CD 模板。
 
-#### Within Open Source Scope
+**不可公开：** Token、密钥、生产凭据、私有数据、生产日志、基础设施配置。
 
-The following content may be included in the public repository:
-
-* Application source code
-* Unit tests and integration tests
-* Public technical documentation
-* Configuration file templates
-* Configuration schemas
-* Database schemas and migration code
-* Development and testing tools
-* CI/CD configurations without sensitive information
-* Deployment templates without production credentials
-* Public architecture and engineering documentation
-* Sample data specifically for development or testing
-* Project dependency declarations and necessary lock files
-
-#### Outside Open Source Scope
-
-The following content must not be committed to the public repository:
-
-* API Keys
-* Access Tokens
-* GitHub Personal Access Tokens
-* SSH private keys
-* TLS private keys
-* Passwords
-* Session cookies
-* Authentication credentials
-* Production environment secrets
-* Private webhook URLs containing authentication information
-* Database usernames and passwords
-* Cloud platform and infrastructure credentials
-* Personal access credentials
-* Private or user data
-* Production database content
-* Production logs containing sensitive information
-* Internal monitoring and operations credentials
-* Machine-specific sensitive configurations
-* Any information that may lead to unauthorized access
-
-Environment-related configurations should be provided through environment variables, secret management systems, or other secure runtime injection mechanisms, rather than committing real credentials directly.
+环境相关配置应通过环境变量或 Secret 管理机制提供，而不是直接提交真实凭据。
 
 ### Security Boundaries
 
-The GitHub repository is the source code release boundary, not a storage location for production secrets, production data, or private runtime status.
-
-Web-Watcher should maintain the following boundaries:
+公开 GitHub 仓库是源代码发布边界，不是生产 Secret 或私有运行状态的存储位置。
 
 ```
-Public GitHub Repository
+公开 GitHub 仓库
         │
-        ├── Source Code
-        ├── Tests
-        ├── Documentation
-        ├── Public Configuration Templates
-        └── Deployment / CI Templates
+        ├── 源代码
+        ├── 测试
+        ├── 文档
+        ├── 公开配置模板
+        └── 部署 / CI 模板
                 │
                 ▼
-            Runtime Environment
+            运行环境
                 │
-                ├── Environment Variables
-                ├── Secrets
-                ├── Credentials
-                ├── Production Database
-                ├── Production Logs
-                └── Runtime State
+                ├── 环境变量
+                ├── Secret
+                ├── 凭据
+                ├── 生产数据库
+                ├── 生产日志
+                └── 运行时状态
 ```
-
-Code in the public repository should be reviewable and developable without submitting any real production credentials to Git.
 
 ### Secret Management
 
-Sensitive information must be provided by the runtime environment and should not be hardcoded in source code.
+敏感信息必须通过运行环境提供，不应硬编码在源代码中。
 
-Recommended approaches:
+推荐使用环境变量、Secret Manager、CI/CD Secret 或容器运行时 Secret 注入。
 
-* Environment variables
-* Secret Manager
-* CI/CD Secrets
-* VPS / container runtime secret injection
-* Cloud platform-provided secret management mechanisms
-
-Example configurations should use placeholders only:
+示例配置只能使用占位符：
 
 ```
-API_KEY=<provided at runtime>
-DATABASE_URL=<provided at runtime>
-WEBHOOK_SECRET=<provided at runtime>
+API_KEY=<运行时提供>
+DATABASE_URL=<运行时提供>
+WEBHOOK_SECRET=<运行时提供>
 ```
-
-It is prohibited to commit after replacing real credentials into example configurations.
-
-### Credential Leak Response
-
-If tokens, API keys, passwords, or other secrets are accidentally committed to Git, simply deleting the file is not enough.
-
-Immediately take the following steps:
-
-1. Revoke or disable the compromised credentials.
-2. Create new credentials.
-3. Remove sensitive information from the current working tree.
-4. Clean sensitive information from Git history as appropriate.
-5. Check CI, logs, caches, build artifacts, and other possible leak locations.
-
-Credentials that have entered public Git history should be considered compromised. Even if the corresponding file is later deleted, the credentials can no longer be trusted.
-
-### Production Environment Boundaries
-
-The public repository does not represent any specific production environment.
-
-The following content belongs to specific deployment environments and is not part of the open source code release:
-
-* Private VPS / cloud infrastructure
-* Production environment credentials
-* Production databases
-* Private logs
-* Monitoring runtime status
-* Deployment environment-specific configurations
-* Private network configurations
-* Internal service addresses
-* User data
-* Other runtime private states
-
-The same Web-Watcher source code can be deployed to different environments, with each environment providing its own runtime configuration.
-
-### Data and Privacy
-
-Web-Watcher may process external information and data generated during operation under different deployment configurations.
-
-The public repository will not provide or include any specific deployment environment's:
-
-* Private production data
-* User data
-* Private data source credentials
-* Production historical data
-* Internal runtime logs
-* Other unauthorized data
-
-Users deploying and using Web-Watcher should independently ensure their deployment complies with applicable laws, data protection requirements, third-party service terms, and their own data processing policies.
-
-### Third-Party Components
-
-Web-Watcher may depend on third-party software, libraries, APIs, models, services, or other external components.
-
-These third-party components are still subject to their respective licenses, terms of service, and usage restrictions.
-
-Web-Watcher's license does not automatically grant any additional rights to any third-party software, services, trademarks, APIs, datasets, models, or other external resources.
-
-Users should independently verify and comply with the licenses and terms of service of relevant third-party components.
 
 ### License
 
-Unless otherwise explicitly stated, Web-Watcher is released under the MIT License.
+Web-Watcher 采用 MIT License 发布。
 
-The full license text is located in the LICENSE file in the repository root.
+完整许可证文本位于仓库根目录的 LICENSE 文件中。
 
-The MIT License permits use, copying, modification, merging, publication, distribution, sublicensing, and sale of copies of the software under the conditions specified in the license.
+MIT License 允许在许可证规定的条件下使用、复制、修改、合并、发布、分发、再许可及销售本软件的副本。
 
-The software is provided "AS IS" under the license, without any warranty beyond what is explicitly stated in the license.
-
-For specific legal rights and obligations, please refer to the LICENSE file in the repository.
-
-### Security Vulnerability Disclosure
-
-If you discover a security vulnerability that may affect Web-Watcher users or deployment environments, please avoid publishing directly exploitable details before the vulnerability is fixed.
-
-Security issue reports should also not contain:
-
-* Real tokens
-* API keys
-* Passwords
-* Private keys
-* Production databases
-* Private data
-* Other sensitive information
-
-### Pre-Commit Checklist
-
-Before committing code to the public repository, confirm that the change does not contain:
-
-* Tokens
-* API keys
-* Passwords
-* Private keys
-* Production environment configurations
-* URLs containing secrets
-* Personal information
-* Production databases
-* Sensitive logs
-* Temporary files
-* Local environment files
-* Machine-specific configurations
-* Other runtime information that should not be made public
-
-For example, local environment files should typically remain untracked:
-
-```
-.env
-.env.*
-```
-
-The public repository can provide templates without real secrets:
-
-```
-.env.example
-```
-
-Specific .gitignore rules should be adjusted according to the actual project structure.
-
-### Final Definition of Open Source Scope
-
-Web-Watcher's open source release scope includes only software code, tests, documentation, and other public resources intentionally committed to this public repository.
-
-Publicly releasing Web-Watcher source code does not imply releasing its production environment, production data, secrets, credentials, infrastructure, or private runtime status.
-
-Any private information not explicitly included in the public repository does not belong to the open source release scope of this project.
-
-> Public software, not the secrets required to run it.
+本软件按许可证规定以 "AS IS"（按现状）提供，不提供超出许可证明确规定范围的任何保证。
