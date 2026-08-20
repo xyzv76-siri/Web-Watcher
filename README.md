@@ -2,282 +2,230 @@
 
 生产级、低频礼貌、可恢复、可追溯的 Web / GitHub 资源变化观测与自动化取证系统。
 
-## What It Does
+## 开源范围
 
-Web-Watcher 持续观测目标资源，按策略评估变化，并在必要时触发调查与通知。
+Web-Watcher 是一个开源软件项目。
 
-核心处理链：
+本仓库公开的是 Web-Watcher 的可复用软件实现、测试代码、公开文档、配置模板以及相关工程组件，用于代码审查、开发、测试、部署和二次开发。
+
+开源仓库与实际生产环境保持明确隔离。
+
+### 开源范围内
+
+以下内容可以包含在公开仓库中：
+
+* 应用源代码
+* 单元测试与集成测试
+* 公开技术文档
+* 配置文件模板
+* 配置 Schema
+* 数据库 Schema 与迁移代码
+* 开发与测试工具
+* 不包含敏感信息的 CI/CD 配置
+* 不包含生产凭据的部署模板
+* 公开的架构与工程文档
+* 专门用于开发或测试的示例数据
+* 项目依赖声明及必要的锁定文件
+
+### 不属于开源范围的内容
+
+以下内容不得提交到公开仓库：
+
+* API Key
+* Access Token
+* GitHub Personal Access Token
+* SSH 私钥
+* TLS 私钥
+* 密码
+* Session Cookie
+* 身份认证凭据
+* 生产环境 Secret
+* 包含认证信息的私有 Webhook URL
+* 数据库账号与密码
+* 云平台及基础设施凭据
+* 个人访问凭据
+* 私人或用户数据
+* 生产数据库内容
+* 包含敏感信息的生产日志
+* 内部监控及运维凭据
+* 机器特定的敏感配置
+* 任何可能导致未授权访问的信息
+
+环境相关配置应通过环境变量、Secret 管理系统或其他安全的运行时注入机制提供，而不是直接提交真实凭据。
+
+## 安全边界
+
+GitHub 仓库是源代码发布边界，不是生产 Secret、生产数据或私有运行状态的存储位置。
+
+Web-Watcher 应保持以下边界：
 
 ```
-Target
-→ Fetch
-→ Signal
-→ Event
-→ Investigation
-→ Evidence
-→ Policy
-→ Notification
+公开 GitHub 仓库
+        │
+        ├── 源代码
+        ├── 测试
+        ├── 文档
+        ├── 公开配置模板
+        └── 部署 / CI 模板
+                │
+                ▼
+            运行环境
+                │
+                ├── 环境变量
+                ├── Secret
+                ├── 凭据
+                ├── 生产数据库
+                ├── 生产日志
+                └── 运行时状态
 ```
 
-它不是 crawler platform，不是 WAF bypass tool，不是 CAPTCHA bypass tool，不是 high-concurrency scraper。
+公开仓库中的代码应当能够被审查和开发，而不需要把任何真实生产凭据提交到 Git。
 
-## Architecture
+## Secret 管理
 
-### Target State
+敏感信息必须通过运行环境提供，不应硬编码在源代码中。
 
-每个 Target 保存自己的调度状态：
+推荐使用：
 
-- `status`：normal / backoff / cooldown / recovering
-- `next_allowed_at`：下一次允许请求的时间
-- `consecutive_failures`：连续失败计数
-- `etag` / `last_modified` / `content_hash`：HTTP 缓存与指纹
+* 环境变量
+* Secret Manager
+* CI/CD Secret
+* VPS / 容器运行时 Secret 注入
+* 云平台提供的 Secret 管理机制
 
-### Host Authority
+示例配置只能使用占位符：
 
-同一 host 的并发请求由 `HostRateLimiter` 统一管理：
-
-- 原子 claim / renew / release
-- 基于 `host_rate_limits` 表的 lease 语义
-- 防止多 worker 同时冲击同一 host
-
-### Fetch Policy
-
-`FetchPolicy` 决定单次请求的放行与退避：
-
-- 检查 Target 的 `next_allowed_at`
-- 检查 Host authority
-- 解析 HTTP 状态与 `Retry-After`
-- 计算 bounded deterministic jitter
-- 输出 `FetchResult` 与 `TargetExecutionResult`
-
-### Signal
-
-Fetch 产生 `Observation`，经 `EventCorrelator` 映射为 `Signal`：
-
-- `content_change`
-- `stars_changed`
-- `release_published`
-
-304 不产生 Signal。
-
-### Event
-
-Signal 被提升为 Event：
-
-- 同一实体的 open Event 会在 24h 窗口内合并
-- Importance 取最大值
-- Event 状态由 `EventStatus` 管理：open / closed
-
-### Investigation & Evidence
-
-Eligible Event 触发 Investigation：
-
-- `InvestigationWorker` 处理持久化 Event
-- 结果写入 `investigation_results` 表
-- `evidence_items` 以 JSON 形式持久化
-- 支持 retry / backoff / state recovery
-
-### Notification
-
-最后 mile 投递：
-
-- `NotificationDispatcher` 消费 pending Notification
-- `AlertSilencer` 在发送前抑制重复/静音
-- `dispatch_token` + `dispatch_owner` + `dispatch_until` 实现 claim fencing
-- 外部发送与数据库 finalization 之间是 **at-least-once** 语义
-
-### Target / Host 两层状态职责
-
-- Target 层：单个 URL / API endpoint 的 resilience 与 backoff
-- Host 层：同一域名/IP 的并发与 rate limit
-- 两层独立持久化，无隐藏共享状态
-
-## Reliability
-
-### HTTP Cache & Conditional Request
-
-- 保存 `ETag` 与 `Last-Modified`
-- 后续请求携带条件头
-- `304 Not Modified` 直接短路，不提取、不比对、不产生 Signal/Event/Investigation/Notification
-
-### Retry-After
-
-- 支持秒数与 HTTP-Date
-- 作为 server instruction 参与 `next_allowed_at` 计算
-- 有上限保护，防止单次 429 把系统锁死一整天
-
-### Bounded Deterministic Jitter
-
-- 退避延迟使用 SHA-256 派生，而非随机数
-- 同一 Target + 同一时刻的 jitter 可重现
-- 避免随机 burst 造成 thundering herd
-
-### Per-Target Backoff
-
-- 阶梯：normal → backoff → cooldown → recovering
-- 每次成功/failure 更新 `consecutive_failures` 与 `next_allowed_at`
-- 持久化在 `targets` 表，重启不丢
-
-### Host Claim Lease
-
-- `host_rate_limits` 表记录 per-host claim
-- 原子 acquire，带 `claim_until` 过期时间
-- worker crash 后 lease 自动过期，新 worker 可重新 claim
-
-### Claim Fencing
-
-- 所有 claim 携带唯一 `claim_token`
-- 更新/释放时校验 token
-- 旧 worker 无法篡改新 worker 持有的 lease
-
-### Stale Lease Recovery
-
-- `ScheduledRunner.run_once()` 每次启动时 reap 过期 lease
-- 不依赖外部 cron 或手动干预
-
-### Atomic Finalization
-
-- `finalize_execution()` 在单事务内完成：
-  - fencing 检查
-  - Target update
-  - Signal insert
-  - Event create/update
-  - Link create
-- 任意步骤失败触发 SQLite rollback，无 partial state
-
-### Crash Recovery
-
-- 所有关键状态持久化在 SQLite
-- 重启后 `_validate_database()` 自动初始化 schema
-- `reap_stale_claims()` 清除过期 lease
-- `claim_targets()` 根据 `targets` 表状态恢复调度
-
-### Multi-Worker Safety
-
-- SQLite 保留锁保证 `claim_targets()` 串行
-- 两个 worker 同时 claim 同一 Target，仅一个成功
-- 失败方返回 `rowcount == 0`，不降级执行
-
-## HTTP Semantics
-
-| Status | Handling |
-|--------|----------|
-| 200 | 提取、normalize、fingerprint、diff、可能产生 Signal |
-| 304 | 短路，保留 ETag/Last-Modified，不产生 Signal |
-| 301/302/307/308 | 记录 redirect 元数据，不自动跟随，由 `updated_url` 承载 |
-| 403 | 视为 forbidden，不重试，不产生 Signal |
-| 404 | 视为 not found，不重试，不产生 Signal |
-| 429 | 解析 Retry-After，更新 `next_allowed_at`，阶梯 cooldown |
-| 5xx | 计入 `consecutive_failures`，进入 backoff/cooldown |
-| timeout | 同 5xx 处理 |
-| DNS 失败 | 同 5xx 处理 |
-
-### 304 Semantics
-
-304 表示资源未改变。Web-Watcher 在此情况下：
-
-- 不调用 extractor
-- 不计算 diff
-- 不创建 Signal
-- 不提升 Event
-- 不触发 Investigation
-- 不发送 Notification
-
-仅更新 `last_fetched_at` 与缓存头。
-
-## Supported Sources
-
-### Generic Web
-
-- CSS / XPath selector 提取
-- 内容 normalization
-- canonical fingerprint
-- dynamic noise suppression（timestamp、random token、tracking param）
-- partial selector failure safety：任一 selector 失败不触发 false positive
-
-### GitHub API
-
-- 官方 API，非 HTML scraping
-- `releases/latest`
-- repository metadata / stars
-- ETag + 304
-- 共享 `HostRateLimiter`
-
-## Investigation & Evidence
-
-Signal → Event → Investigation → persisted Evidence
-
-- Investigation 只处理已持久化 Event
-- 结果与证据写入 `investigation_results` 表
-- 支持 retry / backoff / crash recovery
-- 不会对未持久化 Event 产生 uncontrolled side effects
-
-## Notification Delivery Semantics
-
-**AT-LEAST-ONCE**
-
-**NOT EXACTLY-ONCE**
-
-外部投递流程：
-
-1. worker claim pending Notification
-2. 外部渠道发送成功
-3. 进程在 DB finalize 前 crash
-4. lease 过期
-5. 另一个 worker 可能再次发送相同通知
-
-DB fencing 防止 stale worker finalize 不属于自己的 lease，但无法让外部系统与 SQLite transaction 形成 exactly-once distributed transaction。
-
-## Configuration
-
-配置文件：`config/watcher.json`
-
-- Target 声明式配置
-- URL / selector / interval 校验
-- 环境变量覆盖
-
-## Docker
-
-基于 `python:3.11-slim` 的生产镜像：
-
-- 非 root 用户运行
-- `/data` 持久化 SQLite
-- `/logs` 持久化日志
-- graceful shutdown（SIGTERM/SIGINT）
-- `entrypoint.sh` 轻量 guard
-- `docker-compose.yml` 本地编排
-
-### Health
-
-```bash
-docker compose exec web-watcher python -m web_watcher.cli doctor
+```
+API_KEY=<运行时提供>
+DATABASE_URL=<运行时提供>
+WEBHOOK_SECRET=<运行时提供>
 ```
 
-## Development
+禁止将真实凭据替换进示例配置后提交。
 
-```bash
-python -m pip install --no-deps -e .
-pytest -q
+## 凭据泄露处理
+
+如果 Token、API Key、密码或其他 Secret 被意外提交到 Git，仅删除文件是不够的。
+
+应立即：
+
+1. 撤销或禁用已经泄露的凭据。
+2. 创建新的凭据。
+3. 从当前工作树中删除敏感信息。
+4. 根据实际情况清理 Git 历史中的敏感信息。
+5. 检查 CI、日志、缓存、构建产物及其他可能的泄露位置。
+
+已经进入公开 Git 历史的凭据应视为已经泄露，即使对应文件后来被删除，也不能继续信任该凭据。
+
+## 生产环境边界
+
+公开仓库不代表任何特定的生产环境。
+
+以下内容属于具体部署环境，不属于开源代码发布内容：
+
+* 私有 VPS / 云基础设施
+* 生产环境凭据
+* 生产数据库
+* 私有日志
+* 监控运行状态
+* 部署环境专属配置
+* 私有网络配置
+* 内部服务地址
+* 用户数据
+* 其他运行时私有状态
+
+同一份 Web-Watcher 源代码可以部署到不同环境，并由不同环境提供各自的运行时配置。
+
+## 数据与隐私
+
+Web-Watcher 在不同部署配置下可能处理外部信息以及运行过程中产生的数据。
+
+公开仓库不会提供或包含任何特定部署环境中的：
+
+* 私有生产数据
+* 用户数据
+* 私有数据源凭据
+* 生产历史数据
+* 内部运行日志
+* 其他未经公开授权的数据
+
+部署和使用 Web-Watcher 的用户应自行确保其部署符合适用的法律法规、数据保护要求、第三方服务条款及自身的数据处理政策。
+
+## 第三方组件
+
+Web-Watcher 可能依赖第三方软件、库、API、模型、服务或其他外部组件。
+
+这些第三方组件仍然受到其各自许可证、服务条款及使用限制的约束。
+
+Web-Watcher 的许可证不会自动授予任何第三方软件、服务、商标、API、数据集、模型或其他外部资源的额外权利。
+
+使用者应自行确认并遵守相关第三方组件的许可证及服务条款。
+
+## 许可证
+
+除非另有明确说明，Web-Watcher 采用 MIT License 发布。
+
+完整许可证文本位于仓库根目录的 LICENSE 文件中。
+
+MIT License 允许在许可证规定的条件下使用、复制、修改、合并、发布、分发、再许可及销售本软件的副本。
+
+本软件按许可证规定以 "AS IS"（按现状）提供，不提供超出许可证明确规定范围的任何保证。
+
+如需确定具体法律权利和义务，请以仓库中的 LICENSE 文件为准。
+
+## 安全漏洞披露
+
+如果发现可能影响 Web-Watcher 用户或部署环境的安全漏洞，请避免在漏洞修复之前公开发布可直接利用的详细信息。
+
+安全问题报告中也不应包含：
+
+* 真实 Token
+* API Key
+* 密码
+* 私钥
+* 生产数据库
+* 私人数据
+* 其他敏感信息
+
+## 仓库提交前检查
+
+向公开仓库提交代码前，应确认本次变更没有包含：
+
+* Token
+* API Key
+* 密码
+* 私钥
+* 生产环境配置
+* 包含 Secret 的 URL
+* 个人信息
+* 生产数据库
+* 敏感日志
+* 临时文件
+* 本地环境文件
+* 机器特定配置
+* 其他不应公开的运行时信息
+
+例如，本地环境文件通常应该保持未跟踪：
+
+```
+.env
+.env.*
 ```
 
-## Testing
+而公开仓库可以提供不包含真实 Secret 的模板：
 
-```bash
-pytest -q
+```
+.env.example
 ```
 
-## Security Boundaries
+具体 .gitignore 规则应根据实际项目结构进行调整。
 
-- 无 WAF bypass
-- 无 CAPTCHA bypass
-- 无 TLS fingerprint spoofing
-- 无 proxy rotation for evasion
-- 仅通过官方 GitHub API 访问 GitHub
+## 开源范围最终定义
 
-## Limitations
+Web-Watcher 的开源发布范围仅包括有意提交到本公开仓库中的软件代码、测试、文档及其他公开资源。
 
-- SQLite 单机持久化，非分布式
-- 外部通知为 at-least-once，非 exactly-once
-- GitHub API rate limits 受 upstream 约束
-- extraction failure 不表示 deletion
-- 无跨进程 exactly-once distributed transaction
+公开 Web-Watcher 源代码，不意味着公开其生产环境、生产数据、Secret、凭据、基础设施或私有运行状态。
+
+任何未被明确纳入公开仓库的私有信息，均不属于本项目的开源发布范围。
+
+> 公开软件，不公开运行软件所需要的秘密。
