@@ -21,6 +21,7 @@ from .investigation_adapter import EventInvestigationAdapter
 from .models import Entity, Event, Notification, Signal, Target
 from .notification_dispatcher import NotificationDispatcher
 from .notification_enricher import NotificationEnricher
+from .notification_status import NotificationStatus
 from .repository import Repository
 from .signal_types import SignalType
 
@@ -226,7 +227,7 @@ class UnifiedPipeline:
                 notification = self.enricher.create_enriched_notification(
                     event=event,
                     channel=self.notify_channel,
-                    status="pending",
+                    status=NotificationStatus.PENDING,
                     base_payload={
                         "observation": {
                             "target_id": target_id,

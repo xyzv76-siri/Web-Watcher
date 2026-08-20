@@ -8,6 +8,7 @@ from .event_correlator import EventCorrelator
 from .models import Entity, Event, Notification, Signal
 from .notification_dispatcher import NotificationDispatcher
 from .notification_enricher import NotificationEnricher
+from .notification_status import NotificationStatus
 from .repository import Repository
 from .config import AppConfig
 
@@ -76,7 +77,7 @@ class PipelineRunner:
             notification = self.enricher.create_enriched_notification(
                 event=event,
                 channel=self.notify_channel,
-                status="pending",
+                status=NotificationStatus.PENDING,
             )
             if self.auto_deliver and self.dispatcher:
                 delivery_result = self.dispatcher.dispatch(notification)

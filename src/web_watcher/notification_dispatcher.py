@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .channel_senders import BaseChannelSender, ConsoleSender, DeliveryResult
 from .models import Notification
+from .notification_status import NotificationStatus
 from .repository import Repository
 from .alert_silencer import AlertSilencer
 from .config import AppConfig

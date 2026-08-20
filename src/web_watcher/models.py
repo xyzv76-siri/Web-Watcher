@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from .event_status import EventStatus
 from .event_types import EventType
 from .importance import Importance
+from .notification_status import NotificationStatus
 from .signal_types import SignalType
 
 
@@ -49,10 +50,26 @@ class Event:
 
 @dataclass(frozen=True)
 class Notification:
+    """Last-mile delivery record for an Event.
+
+    Lifecycle:
+    1. ``PENDING`` — created by Pipeline/ScheduledRunner after Policy resolves
+       an Event to a notifiable action.
+    2. ``SUPPRESSED`` — AlertSilencer decides not to send (dedup / cooldown).
+    3. ``RETRY_PENDING`` — transient delivery failure; dispatcher will retry
+       with exponential backoff.
+    4. ``DELIVERED`` — external channel returned success.
+    5. ``FAILED`` — retries exhausted; no further automatic attempts.
+
+    The ``dispatch_token`` / ``dispatch_owner`` / ``dispatch_until`` fields
+    implement at-least-once fencing so that a crashed worker cannot cause
+    duplicate external side-effects after recovery.
+    """
+
     id: Optional[int]
     event_id: int
     channel: str
-    status: str
+    status: NotificationStatus
     created_at: datetime
     sent_at: Optional[datetime] = None
     payload: Optional[Dict[str, Any]] = None

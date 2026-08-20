@@ -313,7 +313,7 @@
 | `fetch_service.py` TEST_ONLY 混在 `src/` | P1 | 建议移至 `tests/` 或标记 `TEST_ONLY` |
 | 无 `schema_version` 表 | P1 | 当前 `CREATE TABLE IF NOT EXISTS` 足够；未来 migration 需要 |
 | CLI worker 缺少 graceful shutdown | P1 | `docker_run.py` 已有；CLI 子命令未统一 |
-| `NotificationStatus` 未使用强类型 Enum | P1 | 当前字符串工作；建议迁移 |
+| `NotificationStatus` 未使用强类型 Enum | **已修复** | 新增 `notification_status.py` `NotificationStatus(StrEnum)`；`models.py` / `pipeline.py` / `pipeline_runner.py` / `notification_enricher.py` / `notification_dispatcher.py` 已收紧边界；1372 tests passed |
 
 ---
 
@@ -336,7 +336,7 @@
 
 **最终状态**: **GA ACCEPT**
 
-所有技术验证通过，报告状态已统一。代码层面无新的 P0，文档层面已补全 Notification at-least-once 语义声明。
+所有技术验证通过，报告状态已统一。代码层面无新的 P0，文档层面已补全 Notification 模型语义文档及 at-least-once 语义声明，并收紧 `NotificationStatus` enum boundary。
 
 ---
 
