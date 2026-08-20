@@ -32,6 +32,7 @@ class NotificationDispatcher:
         repo: Optional[Repository] = None,
         config: Optional[AppConfig] = None,
         retention_manager: Optional[RetentionManager] = None,
+        metrics: Optional[Any] = None,
     ):
         # 兼容旧参数名 repository 与 新参数名 repo
         self.repository = repository or repo
@@ -45,6 +46,15 @@ class NotificationDispatcher:
         self.batch_size = batch_size if batch_size is not None else (config.default_batch_size if config else 10)
         self.silencer = silencer
         self._running = False
+        self.metrics = metrics
+
+    def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
+        if not self.metrics:
+            return
+        try:
+            self.metrics.increment(name, tags=tags, amount=amount)
+        except Exception:
+            pass
 
     def register_sender(self, channel: str, sender: BaseChannelSender) -> None:
         """Registers or overrides a sender for a specific channel."""
@@ -60,78 +70,124 @@ class NotificationDispatcher:
 
     def dispatch_one(self, notification: Notification) -> DeliveryResult:
         """Delivers a single notification and records status/retry metadata in repository."""
-        # 1. 前置告警静音/冷却拦截
-        if self.silencer:
-            is_silenced, reason = self.silencer.should_silence(notification)
-            if is_silenced:
-                if hasattr(self.repository, "mark_notification_suppressed"):
-                    self.repository.mark_notification_suppressed(notification.id, reason=reason)
-                elif hasattr(self.repository, "mark_notification_delivered"):
-                    self.repository.mark_notification_delivered(notification.id)
-                return DeliveryResult(success=True, status_code=200, response_body="suppressed")
-
-        sender = self.resolve_sender(notification.channel)
-        payload = dict(notification.payload or {})
-        retries = payload.get("retry_count", 0)
+        dispatch_token = getattr(notification, "dispatch_token", None)
+        use_fencing = dispatch_token is not None and hasattr(self.repository, "finalize_notification_dispatch")
 
         try:
-            result = sender.send(notification)
-        except Exception as exc:
-            logger.error(f"Unhandled error in channel sender {notification.channel}: {exc}", exc_info=True)
-            result = DeliveryResult(success=False, error_message=str(exc))
-
-        if result.success:
+            # 1. 前置告警静音/冷却拦截
             if self.silencer:
-                self.silencer.record_dispatch(notification)
-            payload["delivered_at"] = datetime.now(timezone.utc).isoformat()
-            payload["delivery_response"] = result.response_body
-            self.repository.update_notification_status(
-                notification_id=notification.id,
-                status="delivered",
-                payload=payload,
-            )
-        else:
-            retries += 1
-            payload["retry_count"] = retries
-            payload["last_error"] = result.error_message or f"Status code {result.status_code}"
+                is_silenced, reason = self.silencer.should_silence(notification)
+                if is_silenced:
+                    if use_fencing:
+                        self.repository.finalize_notification_dispatch(
+                            notification_id=notification.id,
+                            dispatch_token=dispatch_token,
+                            status="delivered",
+                            sent_at=datetime.now(timezone.utc),
+                            payload={"suppressed": True, "reason": reason},
+                        )
+                    elif hasattr(self.repository, "mark_notification_suppressed"):
+                        self.repository.mark_notification_suppressed(notification.id, reason=reason)
+                    elif hasattr(self.repository, "mark_notification_delivered"):
+                        self.repository.mark_notification_delivered(notification.id)
+                    self._inc("notifications_suppressed_total", {"channel": notification.channel})
+                    return DeliveryResult(success=True, status_code=200, response_body="suppressed")
 
-            if retries >= self.max_retries:
-                self.repository.update_notification_status(
-                    notification_id=notification.id,
-                    status="failed",
-                    payload=payload,
+            sender = self.resolve_sender(notification.channel)
+            payload = dict(notification.payload or {})
+            retries = payload.get("retry_count", 0)
+
+            try:
+                result = sender.send(notification)
+            except Exception as exc:
+                self._inc("notifications_sent_total", {"channel": notification.channel, "status": "error"})
+                logger.error(
+                    f"Unhandled error in channel sender {notification.channel}: {exc}",
+                    exc_info=True,
+                    extra={"notification_id": notification.id, "event_id": notification.event_id, "channel": notification.channel},
                 )
+                result = DeliveryResult(success=False, error_message=str(exc))
+
+            if result.success:
+                if self.silencer:
+                    self.silencer.record_dispatch(notification)
+                payload["delivered_at"] = datetime.now(timezone.utc).isoformat()
+                payload["delivery_response"] = result.response_body
+
+                if use_fencing:
+                    self.repository.finalize_notification_dispatch(
+                        notification_id=notification.id,
+                        dispatch_token=dispatch_token,
+                        status="delivered",
+                        sent_at=datetime.now(timezone.utc),
+                        payload=payload,
+                    )
+                else:
+                    self.repository.update_notification_status(
+                        notification_id=notification.id,
+                        status="delivered",
+                        payload=payload,
+                    )
+                self._inc("notifications_sent_total", {"channel": notification.channel, "status": "delivered"})
             else:
-                backoff = self.base_backoff_sec * (2 ** (retries - 1))
-                payload["next_retry_after"] = backoff
-                self.repository.update_notification_status(
-                    notification_id=notification.id,
-                    status="retry_pending",
-                    payload=payload,
-                )
+                retries += 1
+                payload["retry_count"] = retries
+                payload["last_error"] = result.error_message or f"Status code {result.status_code}"
 
-        return result
+                if retries >= self.max_retries:
+                    if use_fencing:
+                        self.repository.finalize_notification_dispatch(
+                            notification_id=notification.id,
+                            dispatch_token=dispatch_token,
+                            status="failed",
+                            sent_at=datetime.now(timezone.utc),
+                            payload=payload,
+                        )
+                    else:
+                        self.repository.update_notification_status(
+                            notification_id=notification.id,
+                            status="failed",
+                            payload=payload,
+                        )
+                    self._inc("notifications_sent_total", {"channel": notification.channel, "status": "failed"})
+                else:
+                    backoff = self.base_backoff_sec * (2 ** (retries - 1))
+                    payload["next_retry_after"] = backoff
+                    if use_fencing:
+                        self.repository.finalize_notification_dispatch(
+                            notification_id=notification.id,
+                            dispatch_token=dispatch_token,
+                            status="retry_pending",
+                            sent_at=datetime.now(timezone.utc),
+                            payload=payload,
+                        )
+                    else:
+                        self.repository.update_notification_status(
+                            notification_id=notification.id,
+                            status="retry_pending",
+                            payload=payload,
+                        )
+                    self._inc("notifications_sent_total", {"channel": notification.channel, "status": "retry_pending"})
+
+            return result
+        finally:
+            # Release claim if we claimed it but finalize didn't clear it (e.g., unexpected exception)
+            if dispatch_token and hasattr(self.repository, "release_notification_dispatch"):
+                try:
+                    self.repository.release_notification_dispatch(notification.id, dispatch_token)
+                except Exception:
+                    pass
 
     def fetch_pending(self, limit: int = 10) -> List[Notification]:
-        """Fetches pending or retry_pending notifications from repository."""
-        if hasattr(self.repository, "get_pending_notifications"):
-            return self.repository.get_pending_notifications(limit=limit)
-        cursor = self.repository.connection.execute(
-            "SELECT * FROM notifications WHERE status IN ('pending', 'retry_pending') ORDER BY created_at ASC LIMIT ?",
-            (limit,),
-        )
-        rows = cursor.fetchall()
-        return [
-            Notification(
-                id=r["id"],
-                event_id=r["event_id"],
-                channel=r["channel"],
-                status=r["status"],
-                payload=json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"],
-                created_at=r["created_at"],
+        """Fetches pending or retry_pending notifications from repository with claim fencing."""
+        if hasattr(self.repository, "claim_notifications"):
+            worker_id = getattr(self, "worker_id", "default-dispatcher")
+            return self.repository.claim_notifications(
+                worker_id=worker_id,
+                limit=limit,
+                lease_duration_sec=300.0,
             )
-            for r in rows
-        ]
+        return []
 
     def run_once(self, trigger_retention: bool = False) -> int:
         """Processes a single batch of pending notifications. Returns count of dispatched items."""

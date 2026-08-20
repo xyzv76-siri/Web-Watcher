@@ -18,12 +18,13 @@ from web_watcher.investigation_planner import (
     Planner,
     PlannerError,
 )
-from web_watcher.investigation_tools import (
+from web_watcher.investigation_tools import Tool
+
+from tests.mock_investigation_tools import (
     MockHistoricalLookupTool,
     MockPageParseTool,
     MockWebFetchTool,
     MockWebSearchTool,
-    Tool,
 )
 
 

@@ -3,6 +3,13 @@
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (0, datetime('now'));
+
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_key TEXT NOT NULL UNIQUE,
@@ -50,6 +57,10 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TEXT NOT NULL,
     sent_at TEXT,
     payload TEXT,
+    dispatch_owner TEXT,
+    dispatch_until TEXT,
+    dispatch_token TEXT,
+    updated_at TEXT NOT NULL,
     FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE,
     UNIQUE(event_id, channel)
 );

@@ -14,7 +14,7 @@ def test_schema_creates_all_tables(tmp_path):
         ).fetchall()
         table_names = sorted(row["name"] for row in tables if row["name"] != "sqlite_sequence")
 
-        expected = sorted(["entities", "signals", "events", "event_signals", "notifications", "fetch_state", "investigation_results", "investigation_evidence"])
+        expected = sorted(["schema_version", "entities", "signals", "events", "event_signals", "notifications", "fetch_state", "investigation_results", "investigation_evidence"])
         assert table_names == expected
 
 
@@ -87,12 +87,12 @@ def test_notification_unique_per_event_channel(tmp_path):
         conn.execute("INSERT INTO events (entity_id, event_type, status, importance, created_at, updated_at) VALUES (?,?,?,?,?,?)",
                      (1, "test", "detected", "low", dt, dt))
 
-        conn.execute("INSERT INTO notifications (event_id, channel, status, created_at) VALUES (?,?,?,?)",
-                     (1, "telegram", "pending", dt))
+        conn.execute("INSERT INTO notifications (event_id, channel, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+                     (1, "telegram", "pending", dt, dt))
 
         try:
-            conn.execute("INSERT INTO notifications (event_id, channel, status, created_at) VALUES (?,?,?,?)",
-                         (1, "telegram", "pending", dt))
+            conn.execute("INSERT INTO notifications (event_id, channel, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+                         (1, "telegram", "pending", dt, dt))
             conn.commit()
             assert False, "Should have raised IntegrityError"
         except Exception:

@@ -18,11 +18,12 @@ from web_watcher.ai_contract import (
     AIContext,
     AIJudge,
     AIJudgment,
-    MockProvider,
     ProviderResponse,
     _parse_provider_json,
     _parse_provider_json_to_judgment,
 )
+
+from tests.mock_ai_provider import MockProvider
 from web_watcher.ai_errors import (
     AIError,
     InvalidJSONError,

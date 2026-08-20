@@ -56,6 +56,9 @@ class Notification:
     created_at: datetime
     sent_at: Optional[datetime] = None
     payload: Optional[Dict[str, Any]] = None
+    dispatch_owner: Optional[str] = None
+    dispatch_until: Optional[datetime] = None
+    dispatch_token: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class Target:
     lease_owner: Optional[str] = None
     lease_until: Optional[datetime] = None
     claim_token: Optional[str] = None
+    execution_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

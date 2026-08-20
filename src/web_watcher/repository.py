@@ -1,6 +1,7 @@
 """Persistence operations for Web Watcher core state."""
 
 import json
+import logging
 import sqlite3
 
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from .event_status import EventStatus
 from .event_types import EventType
 from .importance import Importance
 from .signal_types import SignalType
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -172,13 +175,43 @@ def _deserialize_importance(val: str) -> Importance:
         return Importance.INTERESTING
 
 
+SCHEMA_VERSION = 1
+
+
 class Repository:
     def __init__(self, database_path):
         self.connection = open_database(database_path)
         initialize_schema(self.connection)
+        self._apply_migrations()
 
     def close(self):
         self.connection.close()
+
+    def _get_schema_version(self) -> int:
+        cursor = self.connection.execute("SELECT MAX(version) as v FROM schema_version")
+        row = cursor.fetchone()
+        return int(row["v"]) if row and row["v"] is not None else 0
+
+    def _set_schema_version(self, version: int) -> None:
+        now_iso = utc_now_iso()
+        self.connection.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (version, now_iso),
+        )
+        self.connection.commit()
+
+    def _apply_migrations(self) -> None:
+        current = self._get_schema_version()
+        while current < SCHEMA_VERSION:
+            next_version = current + 1
+            self._apply_migration(next_version)
+            self._set_schema_version(next_version)
+            current = next_version
+
+    def _apply_migration(self, version: int) -> None:
+        if version == 1:
+            self._init_notification_table()
+        # Future migrations go here
 
     def create_entity(
         self,
@@ -679,8 +712,8 @@ class Repository:
         try:
             cursor = self.connection.execute(
                 """
-                INSERT INTO notifications (event_id, channel, status, created_at, sent_at, payload)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO notifications (event_id, channel, status, created_at, sent_at, payload, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
@@ -689,6 +722,7 @@ class Repository:
                     now,
                     None,
                     json.dumps(payload, default=str) if payload is not None else None,
+                    now,
                 ),
             )
             self.connection.commit()
@@ -704,7 +738,7 @@ class Repository:
         except sqlite3.IntegrityError:
             self.connection.rollback()
             cursor = self.connection.execute(
-                "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE event_id = ? AND channel = ?",
+                "SELECT id, event_id, channel, status, created_at, sent_at, payload, dispatch_owner, dispatch_until, dispatch_token FROM notifications WHERE event_id = ? AND channel = ?",
                 (event_id, channel),
             )
             row = cursor.fetchone()
@@ -718,11 +752,14 @@ class Repository:
                 created_at=row["created_at"],
                 sent_at=row["sent_at"],
                 payload=json.loads(row["payload"]) if row["payload"] else None,
+                dispatch_owner=row["dispatch_owner"],
+                dispatch_until=_parse_iso_datetime(row["dispatch_until"]),
+                dispatch_token=row["dispatch_token"],
             )
 
     def get_notification(self, notification_id: int) -> Optional[Notification]:
         cursor = self.connection.execute(
-            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE id = ?",
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload, dispatch_owner, dispatch_until, dispatch_token FROM notifications WHERE id = ?",
             (notification_id,),
         )
         row = cursor.fetchone()
@@ -736,11 +773,14 @@ class Repository:
             created_at=row["created_at"],
             sent_at=row["sent_at"],
             payload=json.loads(row["payload"]) if row["payload"] else None,
+            dispatch_owner=row["dispatch_owner"],
+            dispatch_until=_parse_iso_datetime(row["dispatch_until"]),
+            dispatch_token=row["dispatch_token"],
         )
 
     def list_notifications_for_event(self, event_id: int) -> list[Notification]:
         cursor = self.connection.execute(
-            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE event_id = ? ORDER BY created_at DESC",
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload, dispatch_owner, dispatch_until, dispatch_token FROM notifications WHERE event_id = ? ORDER BY created_at DESC",
             (event_id,),
         )
         results = []
@@ -754,14 +794,30 @@ class Repository:
                     created_at=row["created_at"],
                     sent_at=row["sent_at"],
                     payload=json.loads(row["payload"]) if row["payload"] else None,
+                    dispatch_owner=row["dispatch_owner"],
+                    dispatch_until=_parse_iso_datetime(row["dispatch_until"]),
+                    dispatch_token=row["dispatch_token"],
                 )
             )
         return results
 
+    def _init_notification_table(self):
+        cols = [c[1] for c in self.connection.execute("PRAGMA table_info(notifications)").fetchall()]
+        for col_name, col_type in [
+            ("dispatch_owner", "TEXT"),
+            ("dispatch_until", "TEXT"),
+            ("dispatch_token", "TEXT"),
+            ("updated_at", "TEXT"),
+        ]:
+            if col_name not in cols:
+                self.connection.execute(f"ALTER TABLE notifications ADD COLUMN {col_name} {col_type}")
+        self.connection.commit()
+
     def get_pending_notifications(self, limit: int = 10) -> list[Notification]:
+        now_iso = utc_now_iso()
         cursor = self.connection.execute(
-            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications WHERE status IN ('pending', 'retry_pending') ORDER BY created_at ASC LIMIT ?",
-            (limit,),
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload, dispatch_owner, dispatch_until, dispatch_token FROM notifications WHERE status IN ('pending', 'retry_pending') AND (dispatch_until IS NULL OR dispatch_until < ?) ORDER BY created_at ASC LIMIT ?",
+            (now_iso, limit),
         )
         results = []
         for row in cursor.fetchall():
@@ -774,9 +830,139 @@ class Repository:
                     created_at=row["created_at"],
                     sent_at=row["sent_at"],
                     payload=json.loads(row["payload"]) if row["payload"] else None,
+                    dispatch_owner=row["dispatch_owner"],
+                    dispatch_until=_parse_iso_datetime(row["dispatch_until"]),
+                    dispatch_token=row["dispatch_token"],
                 )
             )
         return results
+
+    def claim_notifications(
+        self,
+        worker_id: str,
+        limit: int = 10,
+        lease_duration_sec: float = 300.0,
+        now: Optional[datetime] = None,
+    ) -> list[Notification]:
+        """
+        Atomic claim for distributed notification dispatch.
+        Selects pending/retry_pending notifications and assigns a short-lived lease with a unique dispatch token.
+        """
+        import uuid
+        from datetime import timedelta, timezone
+
+        self._init_notification_table()
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        dispatch_until_dt = now_dt + timedelta(seconds=lease_duration_sec)
+        now_iso = now_dt.isoformat()
+        dispatch_until_iso = dispatch_until_dt.isoformat()
+
+        claimed: list[Notification] = []
+
+        with self.connection:
+            cursor = self.connection.cursor()
+            rows = cursor.execute("""
+                SELECT id, event_id, channel, status, created_at, sent_at, payload
+                FROM notifications
+                WHERE status IN ('pending', 'retry_pending')
+                  AND (dispatch_until IS NULL OR dispatch_until < ?)
+                ORDER BY created_at ASC
+                LIMIT ?
+            """, (now_iso, limit)).fetchall()
+
+            for r in rows:
+                notification_id = r["id"]
+                dispatch_token = str(uuid.uuid4())
+                cursor.execute("""
+                    UPDATE notifications
+                    SET dispatch_owner = ?, dispatch_until = ?, dispatch_token = ?
+                    WHERE id = ? AND (dispatch_until IS NULL OR dispatch_until < ?)
+                """, (worker_id, dispatch_until_iso, dispatch_token, notification_id, now_iso))
+
+                if cursor.rowcount:
+                    claimed.append(
+                        Notification(
+                            id=notification_id,
+                            event_id=r["event_id"],
+                            channel=r["channel"],
+                            status=r["status"],
+                            created_at=r["created_at"],
+                            sent_at=r["sent_at"],
+                            payload=json.loads(r["payload"]) if r["payload"] else None,
+                            dispatch_owner=worker_id,
+                            dispatch_until=dispatch_until_dt,
+                            dispatch_token=dispatch_token,
+                        )
+                    )
+
+        return claimed
+
+    def release_notification_dispatch(
+        self,
+        notification_id: int,
+        dispatch_token: str,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Release a claimed notification's dispatch lease if the token matches.
+        Returns True if the row was updated, False if the lease was lost.
+        """
+        if now is None:
+            now_iso = utc_now_iso()
+        else:
+            now_iso = _serialize_datetime(now)
+
+        with self.connection:
+            cursor = self.connection.execute("""
+                UPDATE notifications
+                SET dispatch_owner = NULL, dispatch_until = NULL, dispatch_token = NULL, updated_at = ?
+                WHERE id = ? AND dispatch_token = ?
+            """, (now_iso, notification_id, dispatch_token))
+            return cursor.rowcount > 0
+
+    def finalize_notification_dispatch(
+        self,
+        notification_id: int,
+        dispatch_token: str,
+        status: str,
+        sent_at: Optional[datetime] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Fenced finalization: only succeeds if the dispatch_token matches.
+        Clears dispatch fields on successful finalization.
+        Returns True if the row was updated, False if the lease was lost.
+        """
+        if now is None:
+            now_iso = utc_now_iso()
+        else:
+            now_iso = _serialize_datetime(now)
+
+        sent_at_iso = _serialize_datetime(sent_at)
+        updates = ["status = ?", "sent_at = ?", "dispatch_owner = NULL", "dispatch_until = NULL", "dispatch_token = NULL", "updated_at = ?"]
+        params: list[Any] = [str(status), sent_at_iso, now_iso]
+
+        if payload is not None:
+            updates.append("payload = ?")
+            params.append(json.dumps(payload))
+
+        params.extend([notification_id, dispatch_token])
+
+        with self.connection:
+            cursor = self.connection.execute(f"""
+                UPDATE notifications
+                SET {', '.join(updates)}
+                WHERE id = ? AND dispatch_token = ?
+            """, params)
+            return cursor.rowcount > 0
 
     def update_notification_status(
         self,
@@ -825,6 +1011,7 @@ class Repository:
                 lease_owner TEXT,
                 lease_until TEXT,
                 claim_token TEXT,
+                execution_id TEXT,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -836,9 +1023,42 @@ class Repository:
             ("lease_owner", "TEXT"),
             ("lease_until", "TEXT"),
             ("claim_token", "TEXT"),
+            ("execution_id", "TEXT"),
         ]:
             if col_name not in cols:
                 self.connection.execute(f"ALTER TABLE targets ADD COLUMN {col_name} {col_type}")
+        self.connection.commit()
+
+    def _init_signal_tables(self):
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                value TEXT,
+                fingerprint TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                importance TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS event_signals (
+                event_id INTEGER NOT NULL,
+                signal_id INTEGER NOT NULL,
+                PRIMARY KEY (event_id, signal_id)
+            )
+        """)
         self.connection.commit()
 
     def save_target(self, target: Any) -> None:
@@ -903,6 +1123,7 @@ class Repository:
             lease_owner=row["lease_owner"],
             lease_until=_parse_iso_datetime(row["lease_until"]),
             claim_token=row["claim_token"],
+            execution_id=row["execution_id"],
             metadata=json.loads(row["metadata_json"] or "{}"),
         )
 
@@ -1031,11 +1252,12 @@ class Repository:
                     else r["status"]
                 )
                 claim_token = str(uuid.uuid4())
+                execution_id = str(uuid.uuid4())
                 cursor.execute("""
                     UPDATE targets
-                    SET status = ?, lease_owner = ?, lease_until = ?, claim_token = ?, updated_at = ?
-                    WHERE id = ?
-                """, (new_status, worker_id, lease_until_iso, claim_token, now_iso, target_id))
+                    SET status = ?, lease_owner = ?, lease_until = ?, claim_token = ?, execution_id = ?, updated_at = ?
+                    WHERE id = ? AND (lease_until IS NULL OR lease_until < ?)
+                """, (new_status, worker_id, lease_until_iso, claim_token, execution_id, now_iso, target_id, now_iso))
 
                 claimed.append(Target(
                     id=target_id,
@@ -1051,6 +1273,7 @@ class Repository:
                     lease_owner=worker_id,
                     lease_until=lease_until_dt,
                     claim_token=claim_token,
+                    execution_id=execution_id,
                     metadata=json.loads(r["metadata_json"] or "{}"),
                 ))
 
@@ -1077,6 +1300,7 @@ class Repository:
         from datetime import timezone
 
         self._init_target_table()
+        self._init_signal_tables()
 
         if now is None:
             now_dt = datetime.now(timezone.utc)
@@ -1097,7 +1321,7 @@ class Repository:
                     UPDATE targets SET
                         status = ?, etag = ?, last_modified = ?, content_hash = ?,
                         consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
-                        lease_owner = NULL, lease_until = NULL, claim_token = NULL,
+                        lease_owner = NULL, lease_until = NULL, claim_token = NULL, execution_id = NULL,
                         metadata_json = ?, updated_at = ?
                     WHERE id = ? AND claim_token = ?
                 """, (
@@ -1110,7 +1334,7 @@ class Repository:
                     UPDATE targets SET
                         status = ?, etag = ?, last_modified = ?, content_hash = ?,
                         consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
-                        lease_owner = NULL, lease_until = NULL, claim_token = NULL,
+                        lease_owner = NULL, lease_until = NULL, claim_token = NULL, execution_id = NULL,
                         updated_at = ?
                     WHERE id = ? AND claim_token = ?
                 """, (
@@ -1133,6 +1357,7 @@ class Repository:
         from datetime import timezone
 
         self._init_target_table()
+        self._init_signal_tables()
 
         if now is None:
             now_dt = datetime.now(timezone.utc)
@@ -1147,7 +1372,335 @@ class Repository:
             cursor = self.connection.cursor()
             cursor.execute("""
                 UPDATE targets
-                SET lease_owner = NULL, lease_until = NULL, claim_token = NULL, updated_at = ?
+                SET lease_owner = NULL, lease_until = NULL, claim_token = NULL, execution_id = NULL, updated_at = ?
                 WHERE id = ? AND claim_token = ?
             """, (now_iso, target_id, claim_token))
             return cursor.rowcount > 0
+
+    def finalize_execution(
+        self,
+        target_id: str,
+        claim_token: str,
+        worker_id: str,
+        transition: Any,
+        signals: List[Any],
+        correlation_plan: Any = None,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Atomic execution finalization with fencing.
+
+        Verifies the claim_token, updates the target, persists signals,
+        creates/updates events, and creates event-signal links — all in
+        a single transaction. Returns True if the target was updated,
+        False if the lease was stale or the target was not found.
+        """
+        from datetime import timezone
+
+        self._init_target_table()
+        self._init_signal_tables()
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        now_iso = now_dt.isoformat()
+        status_val = transition.status.value if hasattr(transition.status, "value") else str(transition.status)
+        next_iso = _serialize_datetime(transition.next_allowed_at)
+        last_fetched_iso = _serialize_datetime(transition.last_fetched_at) if hasattr(transition, 'last_fetched_at') and transition.last_fetched_at else now_iso
+        meta_json = json.dumps(transition.metadata) if getattr(transition, 'metadata', None) is not None else None
+
+        try:
+            with self.connection:
+                cursor = self.connection.cursor()
+
+                # 1. Fencing: verify claim_token and get current lease
+                target_row = cursor.execute("""
+                    SELECT status, claim_token FROM targets WHERE id = ?
+                """, (target_id,)).fetchone()
+
+                if not target_row:
+                    return False
+
+                if target_row["claim_token"] != claim_token:
+                    # Stale claim
+                    return False
+
+                # 2. Get or create entity for this target
+                entity = self.get_or_create_entity(
+                    canonical_key=target_id,
+                    name=target_id,
+                    entity_type="target",
+                )
+                entity_id = entity.id
+
+                # 3. Update target and clear lease
+                if meta_json is not None:
+                    cursor.execute("""
+                        UPDATE targets SET
+                            status = ?, etag = ?, last_modified = ?, content_hash = ?,
+                            consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
+                            lease_owner = NULL, lease_until = NULL, claim_token = NULL, execution_id = NULL,
+                            metadata_json = ?, updated_at = ?
+                        WHERE id = ? AND claim_token = ?
+                    """, (
+                        status_val,
+                        getattr(transition, 'etag', None),
+                        getattr(transition, 'last_modified', None),
+                        getattr(transition, 'content_hash', None),
+                        getattr(transition, 'consecutive_failures', 0),
+                        last_fetched_iso,
+                        next_iso,
+                        meta_json,
+                        now_iso,
+                        target_id,
+                        claim_token,
+                    ))
+                else:
+                    cursor.execute("""
+                        UPDATE targets SET
+                            status = ?, etag = ?, last_modified = ?, content_hash = ?,
+                            consecutive_failures = ?, last_fetched_at = ?, next_allowed_at = ?,
+                            lease_owner = NULL, lease_until = NULL, claim_token = NULL, execution_id = NULL,
+                            updated_at = ?
+                        WHERE id = ? AND claim_token = ?
+                    """, (
+                        status_val,
+                        getattr(transition, 'etag', None),
+                        getattr(transition, 'last_modified', None),
+                        getattr(transition, 'content_hash', None),
+                        getattr(transition, 'consecutive_failures', 0),
+                        last_fetched_iso,
+                        next_iso,
+                        now_iso,
+                        target_id,
+                        claim_token,
+                    ))
+
+                if cursor.rowcount == 0:
+                    return False
+
+                # 4. Persist signals
+                signal_id_map = {}
+                for sig in signals:
+                    try:
+                        raw_value = sig.value
+                        if isinstance(raw_value, (dict, list)):
+                            raw_value = json.dumps(raw_value, default=str)
+                        sig_cursor = cursor.execute("""
+                            INSERT INTO signals
+                                (entity_id, signal_type, observed_at, value, fingerprint, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (
+                            entity_id,
+                            sig.signal_type.value if hasattr(sig.signal_type, 'value') else str(sig.signal_type),
+                            sig.observed_at.isoformat(),
+                            raw_value,
+                            sig.fingerprint,
+                            now_iso,
+                        ))
+                        signal_id_map[sig.fingerprint] = sig_cursor.lastrowid
+                    except sqlite3.IntegrityError:
+                        # Duplicate fingerprint — skip
+                        continue
+
+                # 5. Create events
+                event_id_map = {}
+                for evt in getattr(correlation_plan, 'events_to_create', []) or []:
+                    # Validate event_type
+                    try:
+                        EventType(evt.event_type)
+                    except ValueError:
+                        raise ValueError(f"Invalid event_type: {evt.event_type}")
+
+                    evt_cursor = cursor.execute("""
+                        INSERT INTO events
+                            (entity_id, event_type, status, importance, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        entity_id,
+                        evt.event_type,
+                        evt.status,
+                        evt.importance,
+                        evt.created_at.isoformat(),
+                        evt.updated_at.isoformat(),
+                    ))
+                    event_id_map[id(evt)] = evt_cursor.lastrowid
+
+                # 6. Update events
+                for evt in getattr(correlation_plan, 'events_to_update', []) or []:
+                    cursor.execute("""
+                        UPDATE events SET
+                            status = ?, importance = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        evt.status,
+                        evt.importance,
+                        evt.updated_at.isoformat(),
+                        evt.event_id,
+                    ))
+
+                # 7. Create links
+                signals_list = list(signals) if signals else []
+                new_event_ids = [
+                    event_id_map[id(evt)]
+                    for evt in getattr(correlation_plan, 'events_to_create', []) or []
+                ]
+                new_event_idx = 0
+
+                for idx, link in enumerate(getattr(correlation_plan, 'links', []) or []):
+                    try:
+                        event_id = link.event_id
+                        signal_id = link.signal_id
+
+                        # Resolve event_id placeholder for newly created events
+                        if event_id is None:
+                            if new_event_idx < len(new_event_ids):
+                                event_id = new_event_ids[new_event_idx]
+                                new_event_idx += 1
+                            else:
+                                continue
+
+                        # Resolve signal_id placeholder (-1) to persisted signal ID
+                        if signal_id == -1 and idx < len(signals_list):
+                            sig = signals_list[idx]
+                            signal_id = signal_id_map.get(sig.fingerprint)
+                            if signal_id is None:
+                                continue
+
+                        if event_id is None or signal_id is None:
+                            continue
+
+                        cursor.execute("""
+                            INSERT INTO event_signals (event_id, signal_id)
+                            VALUES (?, ?)
+                        """, (event_id, signal_id))
+                    except sqlite3.IntegrityError:
+                        # Invalid link — skip
+                        continue
+
+                return True
+        except Exception:
+            logger.exception("finalize_execution failed for correlation plan")
+            return False
+
+    def commit_plan(
+        self,
+        correlation_plan: Any,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Persist a CorrelationPlan atomically without target fencing.
+
+        This is intended for signal-driven flows (e.g., webhooks) that do not
+        hold a target lease. It persists signals, creates/updates events, and
+        creates event-signal links in a single transaction.
+        """
+        from datetime import timezone
+
+        self._init_signal_tables()
+
+        if now is None:
+            now_dt = datetime.now(timezone.utc)
+        elif now.tzinfo is None:
+            now_dt = now.replace(tzinfo=timezone.utc)
+        else:
+            now_dt = now.astimezone(timezone.utc)
+
+        now_iso = now_dt.isoformat()
+
+        try:
+            with self.connection:
+                cursor = self.connection.cursor()
+
+                # 1. Persist signals
+                signal_id_map = {}
+                for sig in getattr(correlation_plan, 'signals_to_persist', []) or []:
+                    try:
+                        sig_cursor = cursor.execute("""
+                            INSERT INTO signals
+                                (entity_id, signal_type, observed_at, value, fingerprint, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (
+                            sig.entity_id,
+                            sig.signal_type,
+                            sig.observed_at.isoformat(),
+                            sig.value,
+                            sig.fingerprint,
+                            now_iso,
+                        ))
+                        signal_id_map[sig.fingerprint] = sig_cursor.lastrowid
+                    except sqlite3.IntegrityError:
+                        continue
+
+                # 2. Create events
+                event_id_map = {}
+                for evt in getattr(correlation_plan, 'events_to_create', []) or []:
+                    try:
+                        EventType(evt.event_type)
+                    except ValueError:
+                        raise ValueError(f"Invalid event_type: {evt.event_type}")
+
+                    evt_cursor = cursor.execute("""
+                        INSERT INTO events
+                            (entity_id, event_type, status, importance, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        evt.entity_id,
+                        evt.event_type,
+                        evt.status,
+                        evt.importance,
+                        evt.created_at.isoformat(),
+                        evt.updated_at.isoformat(),
+                    ))
+                    event_id_map[id(evt)] = evt_cursor.lastrowid
+
+                # 3. Update events
+                for evt in getattr(correlation_plan, 'events_to_update', []) or []:
+                    cursor.execute("""
+                        UPDATE events SET
+                            status = ?, importance = ?, updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        evt.status,
+                        evt.importance,
+                        evt.updated_at.isoformat(),
+                        evt.event_id,
+                    ))
+
+                # 4. Create links
+                links = getattr(correlation_plan, 'links', []) or []
+                signals_list = getattr(correlation_plan, 'signals_to_persist', []) or []
+                for idx, link in enumerate(links):
+                    try:
+                        event_id = link.event_id
+                        signal_id = link.signal_id
+
+                        if event_id in event_id_map:
+                            event_id = event_id_map[event_id]
+                        elif event_id is None and event_id_map:
+                            event_id = next(iter(event_id_map.values()))
+
+                        if signal_id == -1 and idx < len(signals_list):
+                            sig = signals_list[idx]
+                            signal_id = signal_id_map.get(sig.fingerprint)
+                            if signal_id is None:
+                                continue
+
+                        if event_id is None or signal_id is None:
+                            continue
+
+                        cursor.execute("""
+                            INSERT INTO event_signals (event_id, signal_id)
+                            VALUES (?, ?)
+                        """, (event_id, signal_id))
+                    except sqlite3.IntegrityError:
+                        continue
+
+                return True
+        except Exception:
+            logger.exception("finalize_execution failed for correlation plan")
+            return False

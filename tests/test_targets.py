@@ -27,10 +27,11 @@ def _mk_target(**overrides):
 class TestWatchTargetDataclass:
 
     def test_all_supported_types_defined(self):
-        assert len(SUPPORTED_TARGET_TYPES) == 3
+        assert len(SUPPORTED_TARGET_TYPES) == 4
         assert "github_repository" in SUPPORTED_TARGET_TYPES
         assert "official_website" in SUPPORTED_TARGET_TYPES
         assert "news_source" in SUPPORTED_TARGET_TYPES
+        assert "web" in SUPPORTED_TARGET_TYPES
 
     def test_default_priority_and_enabled(self):
         t = WatchTarget(
@@ -145,7 +146,7 @@ class TestValidateTargetUrlPolicy:
         )
 
     def test_web_locator_non_http_rejected(self):
-        with pytest.raises(ValueError, match="http:// or https://"):
+        with pytest.raises(ValueError, match="scheme must be http or https"):
             validate_target_url_policy(
                 _mk_target(
                     target_type="official_website",
@@ -154,7 +155,7 @@ class TestValidateTargetUrlPolicy:
             )
 
     def test_web_locator_ftp_rejected(self):
-        with pytest.raises(ValueError, match="http:// or https://"):
+        with pytest.raises(ValueError, match="scheme must be http or https"):
             validate_target_url_policy(
                 _mk_target(
                     target_type="news_source",

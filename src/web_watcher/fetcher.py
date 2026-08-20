@@ -44,10 +44,16 @@ class SmartFetcher:
                 url,
                 headers=headers,
                 timeout=timeout,
-                allow_redirects=True,
+                allow_redirects=False,
             )
 
             status_code = response.status_code
+            redirect_url = response.headers.get("Location") if status_code in (301, 302, 303, 307, 308) else None
+            metadata: Dict[str, Any] = {"headers": dict(response.headers)}
+            if redirect_url:
+                metadata["redirect_url"] = redirect_url
+                metadata["redirect_status"] = status_code
+
             if status_code == 304:
                 return FetchResult(
                     target_key="",
@@ -59,7 +65,21 @@ class SmartFetcher:
                     etag=response.headers.get("ETag"),
                     last_modified=response.headers.get("Last-Modified"),
                     error=None,
-                    metadata={"headers": dict(response.headers)},
+                    metadata=metadata,
+                )
+
+            if status_code in (301, 302, 303, 307, 308):
+                return FetchResult(
+                    target_key="",
+                    status=FetchStatus.REDIRECT,
+                    status_code=status_code,
+                    fetched_at=datetime.now(timezone.utc),
+                    content=None,
+                    content_type=response.headers.get("Content-Type"),
+                    etag=response.headers.get("ETag"),
+                    last_modified=response.headers.get("Last-Modified"),
+                    error=f"HTTP {status_code}: Redirect",
+                    metadata=metadata,
                 )
 
             if 200 <= status_code < 300:
@@ -73,7 +93,7 @@ class SmartFetcher:
                     etag=response.headers.get("ETag"),
                     last_modified=response.headers.get("Last-Modified"),
                     error=None,
-                    metadata={"headers": dict(response.headers)},
+                    metadata=metadata,
                 )
 
             if status_code == 429:
@@ -87,7 +107,7 @@ class SmartFetcher:
                     etag=response.headers.get("ETag"),
                     last_modified=response.headers.get("Last-Modified"),
                     error=f"HTTP {status_code}: Too Many Requests",
-                    metadata={"headers": dict(response.headers)},
+                    metadata=metadata,
                 )
 
             # Other HTTP errors (4xx, 5xx)
@@ -101,7 +121,7 @@ class SmartFetcher:
                 etag=response.headers.get("ETag"),
                 last_modified=response.headers.get("Last-Modified"),
                 error=f"HTTP {status_code}",
-                metadata={"headers": dict(response.headers)},
+                metadata=metadata,
             )
 
         except Timeout:

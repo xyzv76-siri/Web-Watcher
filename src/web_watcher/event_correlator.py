@@ -32,6 +32,57 @@ class CorrelationConfig:
         return timedelta(seconds=self.correlation_window_seconds)
 
 
+@dataclass
+class EventToCreate:
+    entity_id: str
+    event_type: str
+    status: str
+    importance: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass
+class EventToUpdate:
+    event_id: int
+    status: str
+    importance: str
+    updated_at: datetime
+
+
+@dataclass
+class SignalToPersist:
+    entity_id: str
+    signal_type: str
+    observed_at: datetime
+    value: Any
+    fingerprint: str
+
+
+@dataclass
+class LinkToCreate:
+    event_id: int
+    signal_id: int
+
+
+@dataclass
+class CorrelationPlan:
+    events_to_create: List[EventToCreate] = field(default_factory=list)
+    events_to_update: List[EventToUpdate] = field(default_factory=list)
+    signals_to_persist: List[SignalToPersist] = field(default_factory=list)
+    links: List[LinkToCreate] = field(default_factory=list)
+    merged_event_id: Optional[int] = None
+
+    @property
+    def signals(self) -> List[SignalToPersist]:
+        """Backward-compatible alias for signals_to_persist."""
+        return self.signals_to_persist
+
+    @signals.setter
+    def signals(self, value: List[SignalToPersist]) -> None:
+        self.signals_to_persist = value
+
+
 def _derive_event_type(signal: Signal) -> str:
     """Backward-compatible helper that returns the event type string."""
     correlator = EventCorrelator(repository=None)
@@ -56,9 +107,12 @@ class EventCorrelator:
         self.auto_investigate = auto_investigate
         self.config = config or CorrelationConfig()
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
-        self.investigation_adapter = investigation_adapter or (
-            EventInvestigationAdapter() if auto_investigate else None
-        )
+        if investigation_adapter is not None:
+            self.investigation_adapter = investigation_adapter
+        elif auto_investigate and planner is not None and engine is not None:
+            self.investigation_adapter = EventInvestigationAdapter()
+        else:
+            self.investigation_adapter = None
         self.planner = planner
         self.engine = engine
 
@@ -78,8 +132,12 @@ class EventCorrelator:
             return Importance.IMPORTANT
         return Importance.INTERESTING
 
-    def process_signal(self, signal: Signal) -> Event:
-        """Processes an incoming signal, correlates it into an event, and triggers auto-investigation if enabled."""
+    def process_signal(self, signal: Signal) -> CorrelationPlan:
+        """Process a signal and return a CorrelationPlan.
+
+        This method does NOT persist anything. It only makes domain decisions.
+        The caller is responsible for atomic finalization.
+        """
         entity_id = signal.entity_id
         resolved_type = self._resolve_event_type(signal)
         now = self.now_factory()
@@ -92,56 +150,75 @@ class EventCorrelator:
 
         importance = self._evaluate_importance(signal, open_event)
 
+        plan = CorrelationPlan()
+
         if open_event is None:
-            event = self.repository.create_event(
+            plan.events_to_create.append(EventToCreate(
                 entity_id=entity_id,
-                event_type=resolved_type,
-                status=EventStatus.OPEN,
-                importance=importance,
+                event_type=resolved_type.value if hasattr(resolved_type, "value") else str(resolved_type),
+                status=EventStatus.OPEN.value,
+                importance=importance.value if hasattr(importance, "value") else str(importance),
                 created_at=signal.observed_at,
-            )
+                updated_at=now,
+            ))
+            target_event_id = None
         else:
-            event = open_event
+            target_event = open_event
             if (
                 importance == Importance.CRITICAL
-                or (importance == Importance.IMPORTANT and event.importance == Importance.INTERESTING)
+                or (importance == Importance.IMPORTANT and open_event.importance == Importance.INTERESTING)
             ):
-                self.repository.update_event(event.id, importance=importance)
-                refreshed = self.repository.get_event(event.id)
-                if refreshed:
-                    event = refreshed
+                plan.events_to_update.append(EventToUpdate(
+                    event_id=open_event.id,
+                    status=open_event.status.value,
+                    importance=importance.value if hasattr(importance, "value") else str(importance),
+                    updated_at=now,
+                ))
+                target_event_id = open_event.id
+            else:
+                target_event_id = open_event.id
 
-        persisted_signal = self._persist_signal_if_needed(signal)
-        if persisted_signal is not None:
-            signal = persisted_signal
+        plan.merged_event_id = target_event_id
 
-        if signal.id is not None:
-            self.repository.link_signal_to_event(event.id, signal.id)
-
-        if self.auto_investigate:
-            self.dispatch_investigation(event)
-
-        return event
-
-    def _persist_signal_if_needed(self, signal: Signal) -> Optional[Signal]:
-        if signal.id is None:
-            return None
-        existing = self.repository.connection.execute(
-            "SELECT id FROM signals WHERE id = ?", (signal.id,)
-        ).fetchone()
-        if existing:
-            return signal
-        return self.repository.create_signal(
-            entity_id=signal.entity_id,
-            signal_type=signal.signal_type,
+        # Queue signal for persistence
+        plan.signals_to_persist.append(SignalToPersist(
+            entity_id=entity_id,
+            signal_type=signal.signal_type.value if hasattr(signal.signal_type, "value") else str(signal.signal_type),
             observed_at=signal.observed_at,
             value=signal.value,
             fingerprint=signal.fingerprint,
-        )
+        ))
 
-    def correlate(self, signal: Signal) -> Event:
+        # Queue link creation (event_id may be resolved during finalization)
+        plan.links.append(LinkToCreate(
+            event_id=target_event_id,
+            signal_id=-1,  # placeholder, resolved during finalization
+        ))
+
+        return plan
+
+    def correlate(self, signal: Signal) -> CorrelationPlan:
         """Alias for process_signal to maintain backward compatibility."""
         return self.process_signal(signal)
+
+    def build_plans(self, signals: List[Signal]) -> List[CorrelationPlan]:
+        """Build correlation plans for a batch of signals.
+
+        Returns one CorrelationPlan per distinct entity, aggregated from all signals.
+        This method does NOT persist anything.
+        """
+        entity_plans: Dict[str, CorrelationPlan] = {}
+        for signal in signals:
+            plan = self.process_signal(signal)
+            entity_id = signal.entity_id
+            if entity_id not in entity_plans:
+                entity_plans[entity_id] = CorrelationPlan()
+            existing = entity_plans[entity_id]
+            existing.events_to_create.extend(plan.events_to_create)
+            existing.events_to_update.extend(plan.events_to_update)
+            existing.signals_to_persist.extend(plan.signals_to_persist)
+            existing.links.extend(plan.links)
+        return list(entity_plans.values())
 
     def close_event(self, event_id: int) -> None:
         """Close an existing event so it no longer accepts new signals."""

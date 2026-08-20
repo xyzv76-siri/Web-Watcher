@@ -28,12 +28,13 @@ from web_watcher.investigation_result import (
     InvestigationResult,
     InvestigationStatus,
 )
-from web_watcher.investigation_tools import (
+from web_watcher.investigation_tools import ToolResult
+
+from tests.mock_investigation_tools import (
     MockHistoricalLookupTool,
     MockPageParseTool,
     MockWebFetchTool,
     MockWebSearchTool,
-    ToolResult,
 )
 
 

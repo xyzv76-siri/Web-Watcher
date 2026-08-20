@@ -1,13 +1,16 @@
 import os
 import re
 import json
+import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy, FetchDecision, FetchEvaluation
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch import FetchStatus
+from web_watcher.execution_semantics import ExecutionOutcome, transition_for
+from web_watcher.signal_types import SignalType
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -38,6 +41,8 @@ class GitHubTargetExecutionResult:
     consecutive_failures: int = 0
     next_allowed_at: Optional[datetime] = None
     last_fetched_at: Optional[datetime] = None
+    outcome: Any = None
+    transition: Any = None
 
 
 class GitHubTarget:
@@ -72,11 +77,35 @@ class GitHubTarget:
             headers["If-None-Match"] = etag
         return headers
 
-    def _create_signal(self, signal_type: str, payload: Dict[str, Any], now: datetime) -> Any:
+    def _compute_signal_fingerprint(self, signal_type: SignalType, payload: Dict[str, Any]) -> str:
+        """Compute a deterministic fingerprint for idempotency checks."""
+        if signal_type == SignalType.RELEASE_PUBLISHED:
+            raw = f"{self.owner}/{self.repo_name}:{payload.get('tag_name', '')}:{payload.get('published_at', '')}"
+        elif signal_type == SignalType.STARS_CHANGED:
+            raw = f"{self.owner}/{self.repo_name}:stars:{payload.get('new_stars', '')}"
+        else:
+            raw = f"{self.owner}/{self.repo_name}:{signal_type.value}:{json.dumps(payload, sort_keys=True)}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def _is_duplicate_signal(self, signal_type: SignalType, payload: Dict[str, Any], meta: Dict[str, Any]) -> bool:
+        """Check if this signal was already emitted (idempotency guard)."""
+        fp = self._compute_signal_fingerprint(signal_type, payload)
+        emitted = meta.get("emitted_signal_fingerprints", [])
+        return fp in emitted
+
+    def _record_signal_fingerprint(self, signal_type: SignalType, payload: Dict[str, Any], meta: Dict[str, Any]):
+        """Record that this signal was emitted."""
+        fp = self._compute_signal_fingerprint(signal_type, payload)
+        emitted = list(meta.get("emitted_signal_fingerprints", []))
+        emitted.append(fp)
+        # Keep bounded: only remember last 100 fingerprints
+        meta["emitted_signal_fingerprints"] = emitted[-100:]
+
+    def _create_signal(self, signal_type: SignalType, payload: Dict[str, Any], now: datetime) -> Any:
         if Signal is not None:
             try:
                 return Signal(
-                    id=f"sig_{self.target.id}_{signal_type.lower()}_{int(now.timestamp())}",
+                    id=f"sig_{self.target.id}_{signal_type.value}_{int(now.timestamp())}",
                     entity_id=self.target.id,
                     signal_type=signal_type,
                     payload=payload,
@@ -100,7 +129,7 @@ class GitHubTarget:
         repo: Optional[Any] = None,
         now: Optional[datetime] = None,
     ) -> GitHubTargetExecutionResult:
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc)
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
 
@@ -114,15 +143,25 @@ class GitHubTarget:
                 new_status=self.target.status,
                 signals_emitted=[],
                 reason=decision.reason or "Skipped by policy",
+                outcome=ExecutionOutcome.POLICY_BLOCKED,
+                transition=transition_for(
+                    ExecutionOutcome.POLICY_BLOCKED,
+                    target=self.target,
+                    now=now,
+                ),
             )
 
         meta = dict(self.target.metadata or {})
         signals: List[Any] = []
         is_any_304 = False
         last_status_code = 200
-        observed_status = self.target.status
-        observed_consecutive_failures = 0
-        observed_next_allowed_at = None
+        fetch_error: Optional[str] = None
+
+        # Track outcomes from each sub-fetch to derive the composite outcome.
+        release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+        repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+        release_eval = None
+        repo_eval = None
 
         # 2. 检查 Releases
         if "releases" in self.watch_types:
@@ -130,39 +169,64 @@ class GitHubTarget:
             rel_etag = meta.get("release_etag")
             res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
 
-            eval_res = policy.evaluate_response(self.target, res.status_code, error=res.error, now=now)
-            observed_status = eval_res.new_status
-            observed_consecutive_failures = eval_res.consecutive_failures
-            observed_next_allowed_at = eval_res.next_allowed_at
+            headers_map = {}
+            if isinstance(res.metadata, dict):
+                headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+            release_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+            if res.error:
+                fetch_error = res.error
 
             if res.status == FetchStatus.NOT_MODIFIED:
                 is_any_304 = True
+                release_outcome = ExecutionOutcome.NOT_MODIFIED
             elif res.status_code == 200 and res.content:
                 try:
                     rel_data = json.loads(res.content)
+                except (json.JSONDecodeError, ValueError):
+                    release_outcome = ExecutionOutcome.TRANSFORM_ERROR
+                else:
                     tag_name = rel_data.get("tag_name")
                     prev_tag = meta.get("last_release_tag")
 
                     meta["release_etag"] = res.etag
                     meta["last_release_tag"] = tag_name
 
-                    if prev_tag is not None and prev_tag != tag_name:
-                        sig = self._create_signal(
-                            "GITHUB_RELEASE_PUBLISHED",
-                            {
-                                "owner": self.owner,
-                                "repo": self.repo_name,
-                                "tag_name": tag_name,
-                                "release_name": rel_data.get("name"),
-                                "html_url": rel_data.get("html_url"),
-                                "published_at": rel_data.get("published_at"),
-                                "body": rel_data.get("body", "")[:500],
-                            },
-                            now,
-                        )
-                        signals.append(sig)
-                except Exception:
-                    pass
+                    if prev_tag is not None and prev_tag != tag_name and tag_name is not None:
+                        payload = {
+                            "owner": self.owner,
+                            "repo": self.repo_name,
+                            "tag_name": tag_name,
+                            "release_name": rel_data.get("name"),
+                            "html_url": rel_data.get("html_url"),
+                            "published_at": rel_data.get("published_at"),
+                            "body": rel_data.get("body", "")[:500],
+                            "source": rel_url,
+                            "fetched_at": now.isoformat(),
+                        }
+                        if not self._is_duplicate_signal(SignalType.RELEASE_PUBLISHED, payload, meta):
+                            sig = self._create_signal(
+                                SignalType.RELEASE_PUBLISHED,
+                                payload,
+                                now,
+                            )
+                            signals.append(sig)
+                            self._record_signal_fingerprint(SignalType.RELEASE_PUBLISHED, payload, meta)
+                            release_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                        else:
+                            release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                    else:
+                        release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+            else:
+                # Non-200, non-304 release response
+                if release_eval and release_eval.new_status == TargetStatus.COOLDOWN:
+                    release_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                    release_outcome = ExecutionOutcome.TIMEOUT
+                elif res.error or (res.status_code is not None and res.status_code >= 400):
+                    release_outcome = ExecutionOutcome.FETCH_FAILED
+                else:
+                    release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
             last_status_code = res.status_code
 
         # 3. 检查 Repo Meta (Stars)
@@ -171,10 +235,21 @@ class GitHubTarget:
             repo_etag = meta.get("repo_etag")
             res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
 
-            if res.status_code == 200 and res.content:
+            headers_map = {}
+            if isinstance(res.metadata, dict):
+                headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+            repo_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+            if res.error:
+                fetch_error = res.error
+
+            if res.status == FetchStatus.NOT_MODIFIED:
+                is_any_304 = True
+                repo_outcome = ExecutionOutcome.NOT_MODIFIED
+            elif res.status_code == 200 and res.content:
                 try:
                     repo_data = json.loads(res.content)
-                    stars = repo_data.get("stargazers_count", 0)
+                    stars = int(repo_data.get("stargazers_count") or 0)
                     prev_stars = meta.get("last_stars")
 
                     meta["repo_etag"] = res.etag
@@ -183,30 +258,107 @@ class GitHubTarget:
                     if prev_stars is not None:
                         delta = stars - prev_stars
                         if abs(delta) >= self.star_delta_threshold:
-                            sig = self._create_signal(
-                                "GITHUB_STARS_CHANGED",
-                                {
-                                    "owner": self.owner,
-                                    "repo": self.repo_name,
-                                    "old_stars": prev_stars,
-                                    "new_stars": stars,
-                                    "delta": delta,
-                                },
-                                now,
-                            )
-                            signals.append(sig)
-                except Exception:
-                    pass
-            elif res.status == FetchStatus.NOT_MODIFIED:
-                is_any_304 = True
+                            payload = {
+                                "owner": self.owner,
+                                "repo": self.repo_name,
+                                "old_stars": prev_stars,
+                                "new_stars": stars,
+                                "delta": delta,
+                                "source": repo_url,
+                                "fetched_at": now.isoformat(),
+                            }
+                            if not self._is_duplicate_signal(SignalType.STARS_CHANGED, payload, meta):
+                                sig = self._create_signal(
+                                    SignalType.STARS_CHANGED,
+                                    payload,
+                                    now,
+                                )
+                                signals.append(sig)
+                                self._record_signal_fingerprint(SignalType.STARS_CHANGED, payload, meta)
+                                repo_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                            else:
+                                repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                        else:
+                            repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                    else:
+                        # First observation: establish baseline
+                        repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    repo_outcome = ExecutionOutcome.TRANSFORM_ERROR
+            else:
+                if repo_eval and repo_eval.new_status == TargetStatus.COOLDOWN:
+                    repo_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                    repo_outcome = ExecutionOutcome.TIMEOUT
+                elif res.error or (res.status_code is not None and res.status_code >= 400):
+                    repo_outcome = ExecutionOutcome.FETCH_FAILED
+                else:
+                    repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
             last_status_code = res.status_code
 
-        # 4. Return observation-only result; scheduler/repo owns durable persistence.
+        # 4. Determine composite outcome
+        if signals:
+            outcome = ExecutionOutcome.SUCCESS_CHANGED
+        elif is_any_304:
+            # Any checked watch type returned 304 → overall NOT_MODIFIED.
+            # Unchecked watch types keep their initial SUCCESS_UNCHANGED and must not block this.
+            outcome = ExecutionOutcome.NOT_MODIFIED
+        elif release_outcome == ExecutionOutcome.POLICY_COOLDOWN or repo_outcome == ExecutionOutcome.POLICY_COOLDOWN:
+            outcome = ExecutionOutcome.POLICY_COOLDOWN
+        elif release_outcome == ExecutionOutcome.TIMEOUT or repo_outcome == ExecutionOutcome.TIMEOUT:
+            outcome = ExecutionOutcome.TIMEOUT
+        elif release_outcome == ExecutionOutcome.FETCH_FAILED or repo_outcome == ExecutionOutcome.FETCH_FAILED:
+            outcome = ExecutionOutcome.FETCH_FAILED
+        elif release_outcome == ExecutionOutcome.TRANSFORM_ERROR or repo_outcome == ExecutionOutcome.TRANSFORM_ERROR:
+            outcome = ExecutionOutcome.TRANSFORM_ERROR
+        else:
+            outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+
+        # Use the most "severe" evaluation for transition state.
+        # Priority: POLICY_COOLDOWN > TIMEOUT > FETCH_FAILED > TRANSFORM_ERROR > SUCCESS_CHANGED > NOT_MODIFIED > SUCCESS_UNCHANGED
+        if release_eval and repo_eval:
+            if release_eval.new_status == TargetStatus.COOLDOWN or repo_eval.new_status == TargetStatus.COOLDOWN:
+                observed_status = TargetStatus.COOLDOWN
+                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
+                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+            elif release_eval.new_status == TargetStatus.BACKOFF or repo_eval.new_status == TargetStatus.BACKOFF:
+                observed_status = TargetStatus.BACKOFF
+                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
+                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+            else:
+                observed_status = TargetStatus.NORMAL
+                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
+                observed_next_allowed_at = release_eval.next_allowed_at or repo_eval.next_allowed_at
+        elif release_eval:
+            observed_status = release_eval.new_status
+            observed_consecutive_failures = release_eval.consecutive_failures
+            observed_next_allowed_at = release_eval.next_allowed_at
+        elif repo_eval:
+            observed_status = repo_eval.new_status
+            observed_consecutive_failures = repo_eval.consecutive_failures
+            observed_next_allowed_at = repo_eval.next_allowed_at
+
+        # 5. Build transition
+        combined_etag = meta.get("release_etag") or meta.get("repo_etag")
+        transition = transition_for(
+            outcome,
+            target=self.target,
+            now=now,
+            etag=combined_etag,
+            last_modified=None,
+            metadata=meta if signals else None,
+            consecutive_failures=observed_consecutive_failures,
+            next_allowed_at=observed_next_allowed_at,
+            emit_signal=bool(signals),
+            reason=f"Emitted {len(signals)} GitHub signals" if signals else "No new events",
+        )
+
+        # 5. Return observation-only result; scheduler/repo owns durable persistence.
         return GitHubTargetExecutionResult(
             target_id=self.target.id,
             allowed=True,
             status_code=last_status_code,
-            new_status=observed_status,
+            new_status=transition.status,
             signals_emitted=signals,
             is_304=is_any_304 and len(signals) == 0,
             reason=f"Emitted {len(signals)} GitHub signals" if signals else "No new events",
@@ -214,4 +366,6 @@ class GitHubTarget:
             consecutive_failures=observed_consecutive_failures,
             next_allowed_at=observed_next_allowed_at,
             last_fetched_at=now,
+            outcome=outcome,
+            transition=transition,
         )

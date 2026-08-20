@@ -116,6 +116,9 @@ class EventInvestigationAdapter:
         if not self.is_eligible(event):
             return None
 
+        if planner is None or engine is None:
+            return None
+
         task = self.resolve_task_type(event)
         policy = self.build_policy(event)
         context = self.build_context(event)

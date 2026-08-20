@@ -2,7 +2,7 @@ import os
 import logging
 import socket
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Union
 
 from web_watcher.repository import Repository
@@ -14,11 +14,18 @@ from web_watcher.generic_web_target import GenericWebTarget
 from web_watcher.github_target import GitHubTarget
 from web_watcher.rule_parser import RuleParser
 from web_watcher.rule_models import RuleSet, WatcherRule
+from web_watcher.signal_types import SignalType
 
 try:
-    from web_watcher.event_correlator import EventCorrelator
+    from web_watcher.event_correlator import EventCorrelator, CorrelationPlan
 except ImportError:
     EventCorrelator = None
+    CorrelationPlan = None
+
+try:
+    from web_watcher.models import Signal
+except ImportError:
+    Signal = None
 
 try:
     from web_watcher.notification_dispatcher import NotificationDispatcher
@@ -43,6 +50,7 @@ class ScheduledRunner:
         fetcher: Optional[SmartFetcher] = None,
         policy: Optional[FetchPolicy] = None,
         worker_id: Optional[str] = None,
+        metrics: Optional[Any] = None,
     ):
         self.config = config or get_config()
         self.repo = repo
@@ -51,6 +59,15 @@ class ScheduledRunner:
         self.policy = policy or FetchPolicy()
         self._rule_cache: Dict[str, WatcherRule] = {}
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
+        self.metrics = metrics
+
+    def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
+        if not self.metrics:
+            return
+        try:
+            self.metrics.increment(name, tags=tags, amount=amount)
+        except Exception:
+            pass
 
     def sync_rules(self, rules_path: Optional[Union[str, Path]] = None) -> List[Target]:
         path = rules_path or self.rules_path
@@ -126,6 +143,30 @@ class ScheduledRunner:
                 timeout=timeout,
             )
 
+    @staticmethod
+    def _normalize_signal(sig: Any, target_id: str) -> Any:
+        """Convert dict-based signal payloads into Signal model instances."""
+        if Signal is None:
+            return sig
+        if isinstance(sig, Signal):
+            return sig
+        if isinstance(sig, dict):
+            try:
+                observed_at = sig.get("captured_at", datetime.now(timezone.utc))
+                if isinstance(observed_at, str):
+                    observed_at = datetime.fromisoformat(observed_at)
+                return Signal(
+                    id=sig.get("id"),
+                    entity_id=sig.get("target_id", target_id),
+                    signal_type=sig.get("signal_type", SignalType.CONTENT_CHANGE.value),
+                    observed_at=observed_at,
+                    value=sig.get("extracted_values") or sig.get("content_hash") or "",
+                    fingerprint=sig.get("content_hash"),
+                )
+            except Exception:
+                return sig
+        return sig
+
     def _commit_or_release(
         self,
         target_id: str,
@@ -133,39 +174,118 @@ class ScheduledRunner:
         result,
         now: datetime,
     ) -> None:
-        if not self.repo or not hasattr(self.repo, "commit_target_execution"):
+        if not self.repo:
             return
 
-        new_status = getattr(result, "new_status", TargetStatus.NORMAL)
-        etag = getattr(result, "updated_etag", None)
-        last_modified = getattr(result, "updated_last_modified", None)
-        content_hash = getattr(result, "updated_content_hash", None)
-        metadata = getattr(result, "updated_metadata", None)
-        consecutive_failures = getattr(result, "consecutive_failures", 0)
-        next_allowed_at = getattr(result, "next_allowed_at", None)
-        last_fetched_at = getattr(result, "last_fetched_at", now)
+        transition = getattr(result, "transition", None)
+        if transition is None:
+            # Fallback for legacy results without explicit transition
+            new_status = getattr(result, "new_status", TargetStatus.NORMAL)
+            etag = getattr(result, "updated_etag", None)
+            last_modified = getattr(result, "updated_last_modified", None)
+            content_hash = getattr(result, "updated_content_hash", None)
+            metadata = getattr(result, "updated_metadata", None)
+            consecutive_failures = getattr(result, "consecutive_failures", 0)
+            next_allowed_at = getattr(result, "next_allowed_at", None)
+            last_fetched_at = getattr(result, "last_fetched_at", now)
 
-        committed = self.repo.commit_target_execution(
-            target_id=target_id,
-            claim_token=claim_token,
-            new_status=new_status,
-            etag=etag,
-            last_modified=last_modified,
-            content_hash=content_hash,
-            consecutive_failures=consecutive_failures,
-            next_allowed_at=next_allowed_at,
-            metadata=metadata,
-            now=now,
-        )
-        if not committed:
-            logger.warning(f"Fenced commit failed for target '{target_id}'; lease may have been lost.")
+            if hasattr(self.repo, "commit_target_execution"):
+                committed = self.repo.commit_target_execution(
+                    target_id=target_id,
+                    claim_token=claim_token,
+                    new_status=new_status,
+                    etag=etag,
+                    last_modified=last_modified,
+                    content_hash=content_hash,
+                    consecutive_failures=consecutive_failures,
+                    next_allowed_at=next_allowed_at,
+                    metadata=metadata,
+                    now=now,
+                )
+                if not committed:
+                    logger.warning(f"Fenced commit failed for target '{target_id}'; lease may have been lost.")
+            return
+
+        # Build CorrelationPlan from emitted signals
+        correlation_plan = None
+        if EventCorrelator is not None:
+            try:
+                correlator = EventCorrelator(repository=self.repo)
+                raw_signals = getattr(result, "signals_emitted", []) or []
+                signals = [self._normalize_signal(s, target_id) for s in raw_signals]
+                if signals:
+                    correlation_plan = CorrelationPlan()
+                    for sig in signals:
+                        try:
+                            plan = correlator.process_signal(sig)
+                            # Merge plans
+                            correlation_plan.events_to_create.extend(plan.events_to_create)
+                            correlation_plan.events_to_update.extend(plan.events_to_update)
+                            correlation_plan.signals_to_persist.extend(plan.signals_to_persist)
+                            correlation_plan.links.extend(plan.links)
+                        except Exception:
+                            pass
+            except Exception:
+                correlation_plan = None
+
+        if correlation_plan is not None:
+            self._inc("events_created_total", {"target_id": target_id}, amount=len(getattr(correlation_plan, "events_to_create", []) or []))
+
+        # Use finalize_execution if available (atomic finalization)
+        if hasattr(self.repo, "finalize_execution"):
+            raw_signals = getattr(result, "signals_emitted", []) or []
+            signals = [self._normalize_signal(s, target_id) for s in raw_signals]
+            committed = self.repo.finalize_execution(
+                target_id=target_id,
+                claim_token=claim_token,
+                worker_id=self.worker_id,
+                transition=transition,
+                signals=signals,
+                correlation_plan=correlation_plan,
+                now=now,
+            )
+            import logging
+            logging.warning(f"[DEBUG] finalize_execution committed={committed}, signals_count={len(signals)}, correlation_plan={correlation_plan}")
+            if not committed:
+                logger.warning(
+                    f"Fenced finalize failed for target '{target_id}'; lease may have been lost.",
+                    extra={"target_id": target_id, "worker_id": self.worker_id},
+                )
+        elif hasattr(self.repo, "commit_target_execution"):
+            # Legacy fallback
+            new_status = transition.status
+            etag = getattr(transition, 'etag', None)
+            last_modified = getattr(transition, 'last_modified', None)
+            content_hash = getattr(transition, 'content_hash', None)
+            metadata = getattr(transition, 'metadata', None)
+            consecutive_failures = getattr(transition, 'consecutive_failures', 0)
+            next_allowed_at = getattr(transition, 'next_allowed_at', None)
+            last_fetched_at = getattr(transition, 'last_fetched_at', now)
+
+            committed = self.repo.commit_target_execution(
+                target_id=target_id,
+                claim_token=claim_token,
+                new_status=new_status,
+                etag=etag,
+                last_modified=last_modified,
+                content_hash=content_hash,
+                consecutive_failures=consecutive_failures,
+                next_allowed_at=next_allowed_at,
+                metadata=metadata,
+                now=now,
+            )
+            if not committed:
+                logger.warning(
+                    f"Fenced commit failed for target '{target_id}'; lease may have been lost.",
+                    extra={"target_id": target_id, "worker_id": self.worker_id},
+                )
 
     def run_once(
         self,
         auto_deliver: bool = False,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc)
 
         # 1. 自动同步 YAML 规则
         if self.rules_path:
@@ -191,6 +311,8 @@ class ScheduledRunner:
             "skipped_count": 0,
             "errors": [],
         }
+        import logging
+        logging.warning(f"[DEBUG] claimed count={len(claimed)}, ids={[c.id for c in claimed]}")
 
         all_signals = []
 
@@ -213,20 +335,35 @@ class ScheduledRunner:
                         self.repo.release_target_lease(target.id, claim_token, now=now)
                     continue
 
+                self._inc("fetch_total", {"target_id": target.id})
                 if getattr(result, "is_304", False):
                     summary["is_304_count"] += 1
+                    self._inc("fetch_304_total", {"target_id": target.id})
+
+                status_code = getattr(result, "status_code", None)
+                if status_code == 429:
+                    self._inc("fetch_429_total", {"target_id": target.id})
+                elif status_code == 403:
+                    self._inc("fetch_403_total", {"target_id": target.id})
 
                 if result.signals_emitted:
                     summary["signals_emitted"] += len(result.signals_emitted)
                     all_signals.extend(result.signals_emitted)
+                    self._inc("signals_created_total", {"target_id": target.id}, amount=len(result.signals_emitted))
 
-                if claim_token and hasattr(self.repo, "commit_target_execution"):
+                if claim_token:
                     self._commit_or_release(target.id, claim_token, result, now)
-                elif claim_token and hasattr(self.repo, "release_target_lease"):
-                    self.repo.release_target_lease(target.id, claim_token, now=now)
+                else:
+                    # Unclaimed target (fallback path): nothing to commit or release
+                    pass
 
             except Exception as e:
-                logger.error(f"Error evaluating target '{target.id}': {e}", exc_info=True)
+                self._inc("fetch_error_total", {"target_id": target.id})
+                logger.error(
+                    f"Error evaluating target '{target.id}': {e}",
+                    exc_info=True,
+                    extra={"target_id": target.id, "worker_id": self.worker_id},
+                )
                 summary["errors"].append({"target_id": target.id, "error": str(e)})
                 if claim_token and hasattr(self.repo, "release_target_lease"):
                     try:
@@ -234,18 +371,7 @@ class ScheduledRunner:
                     except Exception:
                         pass
 
-        # 4. 信号聚合与事件关联
-        if self.repo and EventCorrelator and all_signals:
-            try:
-                correlator = EventCorrelator(repository=self.repo)
-                if hasattr(correlator, "correlate_signals"):
-                    correlator.correlate_signals(all_signals)
-                elif hasattr(correlator, "process_pending_signals"):
-                    correlator.process_pending_signals()
-            except Exception as e:
-                logger.warning(f"Event correlation failed: {e}")
-
-        # 5. 自动外发通知
+        # 4. 自动外发通知
         if auto_deliver and self.repo and NotificationDispatcher:
             try:
                 dispatcher = NotificationDispatcher(repository=self.repo, config=self.config)

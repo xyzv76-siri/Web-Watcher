@@ -6,10 +6,10 @@ Uses only stdlib (urllib.request) — no external HTTP client dependencies.
 
 from __future__ import annotations
 
+import email.utils
 import json
-import time
 from datetime import datetime, timezone
-from typing import Optional, cast
+from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -20,6 +20,31 @@ from .targets import WatchTarget
 
 _GITHUB_API_BASE = "https://api.github.com/repos"
 _USER_AGENT = "QwenPaw-WebWatcher/1.0"
+_MAX_RETRY_AFTER_SECONDS = 3600  # bounded upper limit: 1 hour
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse Retry-After header value (seconds or HTTP-date)."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    # Try seconds first
+    try:
+        seconds = float(value)
+        if seconds < 0:
+            return None
+        return min(seconds, _MAX_RETRY_AFTER_SECONDS)
+    except ValueError:
+        pass
+    # Try HTTP-date
+    try:
+        dt = email.utils.parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = (dt - datetime.now(timezone.utc)).total_seconds()
+        return max(0.0, min(delta, _MAX_RETRY_AFTER_SECONDS))
+    except (ValueError, TypeError):
+        return None
 
 
 class GitHubRepositoryAdapter:
@@ -32,13 +57,8 @@ class GitHubRepositoryAdapter:
     def __init__(
         self,
         timeout: float = 15.0,
-        max_retries: int = 3,
-        sleep: Optional[callable] = None,
     ):
         self.timeout = timeout
-        self.max_retries = max_retries
-        # Injectable for deterministic tests
-        self._sleep: callable = (sleep if sleep is not None else time.sleep)
 
     # ------------------------------------------------------------------
     # SourceAdapter protocol
@@ -77,10 +97,37 @@ class GitHubRepositoryAdapter:
 
             with response:
                 raw = response.read().decode("utf-8")
-                payload = json.loads(raw)
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError:
+                    return FetchResult(
+                        target_key=target.key,
+                        status=FetchStatus.HTTP_ERROR,
+                        status_code=response.status,
+                        fetched_at=fetched_at,
+                        error="malformed JSON response",
+                        metadata={
+                            "source": "github",
+                            "endpoint": url,
+                        },
+                    )
+
                 snapshot = self._snapshot(payload)
 
                 headers = response.headers
+                metadata = {
+                    "source": "github",
+                    "endpoint": url,
+                }
+                if headers.get("X-RateLimit-Limit"):
+                    metadata["rate_limit_limit"] = headers.get("X-RateLimit-Limit")
+                if headers.get("X-RateLimit-Remaining"):
+                    metadata["rate_limit_remaining"] = headers.get("X-RateLimit-Remaining")
+                if headers.get("X-RateLimit-Reset"):
+                    metadata["rate_limit_reset"] = headers.get("X-RateLimit-Reset")
+                if headers.get("Retry-After"):
+                    metadata["retry_after"] = headers.get("Retry-After")
+
                 return FetchResult(
                     target_key=target.key,
                     status=FetchStatus.SUCCESS,
@@ -90,10 +137,7 @@ class GitHubRepositoryAdapter:
                     content_type=headers.get("Content-Type"),
                     etag=headers.get("ETag"),
                     last_modified=headers.get("Last-Modified"),
-                    metadata={
-                        "source": "github",
-                        "endpoint": url,
-                    },
+                    metadata=metadata,
                 )
 
         except HTTPError as exc:
@@ -113,16 +157,20 @@ class GitHubRepositoryAdapter:
                     },
                 )
 
+            metadata = {
+                "source": "github",
+                "endpoint": url,
+            }
+            retry_after = exc.headers.get("Retry-After") if hasattr(exc, "headers") else None
+            if retry_after:
+                metadata["retry_after"] = retry_after
             return FetchResult(
                 target_key=target.key,
                 status=FetchStatus.HTTP_ERROR,
                 status_code=exc.code,
                 fetched_at=fetched_at,
                 error=f"HTTP {exc.code}: {exc.reason}",
-                metadata={
-                    "source": "github",
-                    "endpoint": url,
-                },
+                metadata=metadata,
             )
 
         except (URLError, TimeoutError, OSError) as exc:
@@ -149,10 +197,10 @@ class GitHubRepositoryAdapter:
             license_data = None
 
         return GitHubRepositorySnapshot(
-            name=str(payload["name"]),
-            full_name=str(payload["full_name"]),
+            name=payload.get("name", ""),
+            full_name=payload.get("full_name", ""),
             description=payload.get("description"),
-            html_url=str(payload["html_url"]),
+            html_url=payload.get("html_url", ""),
             stars=int(payload.get("stargazers_count") or 0),
             forks=int(payload.get("forks_count") or 0),
             open_issues=int(payload.get("open_issues_count") or 0),
@@ -200,26 +248,8 @@ class GitHubRepositoryAdapter:
             method="GET",
         )
 
-        attempt = 0
+        return urlopen(
+            request,
+            timeout=self.timeout,
+        )
 
-        while True:
-            try:
-                return urlopen(
-                    request,
-                    timeout=self.timeout,
-                )
-
-            except HTTPError as exc:
-                retryable = exc.code == 429 or exc.code >= 500
-                if retryable and attempt < self.max_retries:
-                    self._sleep(2**attempt)
-                    attempt += 1
-                    continue
-                raise
-
-            except URLError:
-                if attempt < self.max_retries:
-                    self._sleep(2**attempt)
-                    attempt += 1
-                    continue
-                raise

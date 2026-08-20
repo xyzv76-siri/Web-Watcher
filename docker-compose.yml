@@ -1,0 +1,35 @@
+services:
+  web-watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web-watcher
+    restart: unless-stopped
+    environment:
+      # Database path lives on the named volume mounted at /data
+      - WEB_WATCHER_DB=/data/web_watcher.db
+      # Log directory
+      - WEB_WATCHER_LOG_DIR=/logs
+      # Optional: override defaults
+      # - WEB_WATCHER_COOLDOWN=300
+      # - WEB_WATCHER_POLL_INTERVAL=60
+      # - WEB_WATCHER_BATCH_SIZE=10
+      # - WEB_WATCHER_WEBHOOK_URL=https://example.com/webhook
+    volumes:
+      - web-watcher-data:/data
+      - web-watcher-logs:/logs
+      # Mount host timezone for consistent UTC handling
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "python", "-m", "web_watcher.cli", "doctor"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  web-watcher-data:
+    driver: local
+  web-watcher-logs:
+    driver: local

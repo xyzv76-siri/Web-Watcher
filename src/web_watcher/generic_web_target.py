@@ -1,7 +1,8 @@
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from web_watcher.signal_types import SignalType
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy
@@ -15,6 +16,7 @@ from web_watcher.normalizer import normalize_extracted_text
 from web_watcher.web_fingerprint import observation_fingerprint, selector_config_fingerprint
 from web_watcher.diff import compute_diff, DiffResult
 from web_watcher.observation import ObservationResult, ObservationStatus
+from web_watcher.dynamic_noise import FalsePositiveGuard, DynamicNoiseFilter, dynamic_noise_ratio
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -38,6 +40,7 @@ class TargetExecutionResult:
     updated_last_modified: Optional[str] = None
     updated_content_hash: Optional[str] = None
     updated_metadata: Optional[Dict[str, Any]] = None
+    updated_url: Optional[str] = None
     consecutive_failures: int = 0
     next_allowed_at: Optional[datetime] = None
     last_fetched_at: Optional[datetime] = None
@@ -55,6 +58,7 @@ class GenericWebTarget:
         extractors: Optional[List[ExtractorConfig]] = None,
         custom_headers: Optional[Dict[str, Any]] = None,
         timeout: float = 10.0,
+        false_positive_guard: Optional[FalsePositiveGuard] = None,
     ):
         _validate_url(target.url)
         for ext in (extractors or []):
@@ -63,6 +67,7 @@ class GenericWebTarget:
         self.extractors = extractors or []
         self.custom_headers = custom_headers or {}
         self.timeout = timeout
+        self.false_positive_guard = false_positive_guard or FalsePositiveGuard()
 
     def execute(
         self,
@@ -71,7 +76,7 @@ class GenericWebTarget:
         repo: Optional[Any] = None,
         now: Optional[datetime] = None,
     ) -> TargetExecutionResult:
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc)
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
 
@@ -122,10 +127,19 @@ class GenericWebTarget:
             now=now,
         )
 
+        # 3-1. Explicit redirect handling: update target URL on permanent redirect
+        redirect_url = None
+        if fetch_res.status == FetchStatus.REDIRECT and fetch_res.metadata:
+            redirect_url = fetch_res.metadata.get("redirect_url")
+            if redirect_url and fetch_res.status_code == 301:
+                # Permanent redirect: update target URL
+                pass
+
         # 4. Collect observation-only state updates; do NOT mutate self.target durable state here.
         observed_status = evaluation.new_status
         updated_etag = evaluation.updated_etag
         updated_last_modified = evaluation.updated_last_modified
+        updated_url = redirect_url if (fetch_res.status_code == 301 and redirect_url) else None
         observed_consecutive_failures = evaluation.consecutive_failures
         observed_next_allowed_at = evaluation.next_allowed_at
         observed_last_fetched_at = now
@@ -144,6 +158,7 @@ class GenericWebTarget:
                 reason=evaluation.reason,
                 updated_etag=updated_etag,
                 updated_last_modified=updated_last_modified,
+                updated_url=updated_url,
                 consecutive_failures=observed_consecutive_failures,
                 next_allowed_at=observed_next_allowed_at,
                 last_fetched_at=observed_last_fetched_at,
@@ -186,6 +201,7 @@ class GenericWebTarget:
                 reason=evaluation.reason,
                 updated_etag=updated_etag,
                 updated_last_modified=updated_last_modified,
+                updated_url=updated_url,
                 consecutive_failures=observed_consecutive_failures,
                 next_allowed_at=observed_next_allowed_at,
                 last_fetched_at=observed_last_fetched_at,
@@ -215,6 +231,7 @@ class GenericWebTarget:
         fingerprints: Dict[str, str] = {}
         previous_values: Dict[str, str] = {}
         diffs: Dict[str, DiffResult] = {}
+        extractor_configs: Dict[str, ExtractorConfig] = {}
         has_failures = False
 
         # Recover previous normalized values from target metadata if available.
@@ -223,13 +240,15 @@ class GenericWebTarget:
         for ext in self.extractors:
             result = DOMExtractor.extract(fetch_res.content, ext)
             extracted_results[ext.name] = result
+            extractor_configs[ext.name] = ext
 
             if not result.is_found:
                 has_failures = True
                 normalized_values[ext.name] = ""
                 fingerprints[ext.name] = ""
-                previous_values[ext.name] = stored_previous.get(ext.name, "")
-                diffs[ext.name] = DiffResult.unchanged("", "")
+                prev = stored_previous.get(ext.name, "")
+                previous_values[ext.name] = prev
+                diffs[ext.name] = compute_diff(prev, "")
                 continue
 
             raw_value = result.value or ""
@@ -265,9 +284,23 @@ class GenericWebTarget:
             should_emit_signal = False
             emit_reason = "All extractors failed; potential selector or content change"
         elif any_changed:
-            observation_status = ObservationStatus.CHANGED
-            should_emit_signal = True
-            emit_reason = "At least one extractor produced a changed normalized value"
+            # Apply false positive guard before emitting a signal.
+            suppress, guard_reason = self.false_positive_guard.should_suppress_signal(
+                diffs=diffs,
+                normalized_values=normalized_values,
+                previous_values=previous_values,
+                all_extractors_failed=all_extractors_failed,
+                is_first_observation=is_first_observation,
+                http_status_code=fetch_res.status_code,
+            )
+            if suppress:
+                observation_status = ObservationStatus.UNCHANGED
+                should_emit_signal = False
+                emit_reason = f"Change suppressed: {guard_reason}"
+            else:
+                observation_status = ObservationStatus.CHANGED
+                should_emit_signal = True
+                emit_reason = guard_reason
         else:
             observation_status = ObservationStatus.UNCHANGED
             should_emit_signal = False
@@ -288,6 +321,17 @@ class GenericWebTarget:
                     "previous_value": previous_values.get(name, ""),
                     "changed": diffs.get(name, DiffResult.unchanged("", "")).changed,
                     "diff_summary": diffs.get(name, DiffResult.unchanged("", "")).summary,
+                    "selector_type": extractor_configs[name].selector_type,
+                    "selector": extractor_configs[name].selector,
+                    # Dynamic noise analysis for investigation.
+                    "noise_filtered_previous": self.false_positive_guard.noise_filter.filter(
+                        previous_values.get(name, "")
+                    ),
+                    "noise_filtered_current": self.false_positive_guard.noise_filter.filter(
+                        normalized_values.get(name, "")
+                    ),
+                    "dynamic_noise_ratio_previous": dynamic_noise_ratio(previous_values.get(name, "")),
+                    "dynamic_noise_ratio_current": dynamic_noise_ratio(normalized_values.get(name, "")),
                 }
                 for name, result in extracted_results.items()
             },
@@ -330,6 +374,16 @@ class GenericWebTarget:
             pass  # unchanged or extraction failure
 
         if should_emit_signal:
+            # Canonical content fingerprint: stable hash of all normalized values.
+            # This allows distinct content changes to produce distinct signals
+            # and supports the UNIQUE(entity_id, signal_type, fingerprint) dedup.
+            canonical_parts = [
+                f"{k}\x1f{v}" for k, v in sorted(normalized_values.items())
+            ]
+            content_hash = hashlib.sha256(
+                "\x1f".join(canonical_parts).encode("utf-8")
+            ).hexdigest()
+
             # Composite payload for downstream Signal/Event creation.
             payload = {
                 "target_id": self.target.id,
@@ -338,6 +392,7 @@ class GenericWebTarget:
                 "extracted_values": {k: v.value for k, v in extracted_results.items() if v.is_found},
                 "normalized_values": normalized_values,
                 "fingerprints": fingerprints,
+                "content_hash": content_hash,
                 "diffs": {
                     name: {
                         "changed": diff.changed,
@@ -345,11 +400,18 @@ class GenericWebTarget:
                         "after": diff.after,
                         "summary": diff.summary,
                         "regions": diff.regions,
+                        # Noise-filtered values for downstream verification.
+                        "noise_filtered_before": self.false_positive_guard.noise_filter.filter(diff.before),
+                        "noise_filtered_after": self.false_positive_guard.noise_filter.filter(diff.after),
                     }
                     for name, diff in diffs.items()
                 },
                 "status_code": fetch_res.status_code,
                 "captured_at": now.isoformat(),
+                # False positive guard metadata.
+                "false_positive_guard": {
+                    "dynamic_noise_threshold": self.false_positive_guard.dynamic_noise_threshold,
+                },
             }
 
             sig_obj = None
@@ -358,16 +420,17 @@ class GenericWebTarget:
                     sig_obj = Signal(
                         id=f"sig_{self.target.id}_{int(now.timestamp())}",
                         entity_id=self.target.id,
-                        signal_type="WEB_CONTENT_CHANGED",
+                        signal_type=SignalType.CONTENT_CHANGE,
                         payload=payload,
-                        created_at=now,
+                        observed_at=now,
                     )
                 except Exception:
                     try:
                         sig_obj = Signal(
                             entity_id=self.target.id,
-                            signal_type="WEB_CONTENT_CHANGED",
+                            signal_type=SignalType.CONTENT_CHANGE,
                             payload=payload,
+                            observed_at=now,
                         )
                     except Exception:
                         sig_obj = payload
@@ -402,6 +465,7 @@ class GenericWebTarget:
             updated_last_modified=updated_last_modified,
             updated_content_hash=updated_content_hash,
             updated_metadata=updated_metadata,
+            updated_url=updated_url,
             consecutive_failures=observed_consecutive_failures,
             next_allowed_at=observed_next_allowed_at,
             last_fetched_at=observed_last_fetched_at,

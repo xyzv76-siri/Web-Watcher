@@ -25,6 +25,7 @@ class FetchStatus(str, Enum):
     TIMEOUT = "timeout"
     NETWORK_ERROR = "network_error"
     INVALID_RESPONSE = "invalid_response"
+    REDIRECT = "redirect"
 
 
 @dataclass(frozen=True)

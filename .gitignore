@@ -14,3 +14,4 @@ reports/*
 !logs/.gitkeep
 !reports/.gitkeep
 *.db
+*_TODO.md
