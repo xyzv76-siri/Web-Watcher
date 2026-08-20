@@ -1,10 +1,12 @@
 """Persistence operations for Web Watcher core state."""
 
+import hashlib
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Union, Dict, List, Any, Tuple
+from typing import Optional, Union, Dict, List, Any, Tuple, Callable
 
 from .models import Entity, Event, FetchState, Notification, Signal
 from .storage import initialize_schema, open_database
@@ -14,6 +16,18 @@ from .importance import Importance
 from .signal_types import SignalType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Migration:
+    version: int
+    name: str
+    up: Callable[["Repository"], None]
+    down: Optional[Callable[["Repository"], None]] = None
+    checksum: Optional[str] = None
+
+    def compute_checksum(self) -> str:
+        return hashlib.sha256(self.name.encode("utf-8")).hexdigest()[:16]
 
 
 def utc_now() -> datetime:
@@ -199,22 +213,52 @@ class Repository:
         )
         self.connection.commit()
 
+    @classmethod
+    def migration_registry(cls) -> Dict[int, Migration]:
+        migrations = {
+            1: Migration(
+                version=1,
+                name="init_notification_table",
+                up=lambda repo: repo._init_notification_table(),
+                down=lambda repo: repo.connection.execute("DROP TABLE IF EXISTS notifications"),
+            ),
+            2: Migration(
+                version=2,
+                name="init_host_rate_limit_table",
+                up=lambda repo: repo._init_host_rate_limit_table(),
+                down=lambda repo: repo.connection.execute("DROP TABLE IF EXISTS host_rate_limits"),
+            ),
+            3: Migration(
+                version=3,
+                name="init_host_rate_limit_claim_until",
+                up=lambda repo: repo._init_host_rate_limit_claim_until(),
+                down=lambda repo: repo.connection.execute("ALTER TABLE host_rate_limits DROP COLUMN IF EXISTS claim_until"),
+            ),
+        }
+        for migration in migrations.values():
+            migration.checksum = migration.compute_checksum()
+        return migrations
+
     def _apply_migrations(self) -> None:
         current = self._get_schema_version()
-        while current < SCHEMA_VERSION:
-            next_version = current + 1
-            self._apply_migration(next_version)
+        registry = self.migration_registry()
+        for next_version in range(current + 1, SCHEMA_VERSION + 1):
+            migration = registry.get(next_version)
+            if migration is None:
+                raise RuntimeError(f"No migration registered for version {next_version}")
+            migration.checksum = migration.compute_checksum()
+            logger.info("Applying migration v%d: %s", next_version, migration.name)
+            migration.up(self)
             self._set_schema_version(next_version)
-            current = next_version
+            logger.info("Applied migration v%d: %s", next_version, migration.name)
 
     def _apply_migration(self, version: int) -> None:
-        if version == 1:
-            self._init_notification_table()
-        if version == 2:
-            self._init_host_rate_limit_table()
-        if version == 3:
-            self._init_host_rate_limit_claim_until()
-        # Future migrations go here
+        # Backward compatibility: delegate to registry if available.
+        registry = self.migration_registry()
+        migration = registry.get(version)
+        if migration is None:
+            raise RuntimeError(f"No migration registered for version {version}")
+        migration.up(self)
 
     def create_entity(
         self,

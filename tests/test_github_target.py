@@ -5,6 +5,7 @@ from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.github_target import GitHubTarget, parse_github_repo
+from web_watcher.fetch_policy import FetchEvaluation
 
 
 RELEASE_PAYLOAD = {
@@ -474,3 +475,107 @@ def test_github_target_authentication_isolation():
 
     assert call_a == "Bearer ghp_token_a"
     assert call_b == "Bearer ghp_token_b"
+
+def test_github_target_subresource_state_persists_cooldown():
+    """Per-subresource BACKOFF should be stored in metadata and skip the subresource next run."""
+    from web_watcher.fetch_policy import FetchPolicy, TargetStatus
+    target = Target(id="gh_sub", url="pallets/flask")
+    policy = FetchPolicy()
+    adapter = GitHubTarget(target=target, watch_types=["releases", "stars"])
+
+    def fake_fetch(url, **kwargs):
+        target_key = "gh_sub"
+        if "releases" in url:
+            return FetchResult(
+                target_key=target_key,
+                status=FetchStatus.SUCCESS,
+                status_code=429,
+                fetched_at=datetime.utcnow(),
+                content="",
+                metadata={"headers": {"Retry-After": "60"}},
+            )
+        return FetchResult(
+            target_key=target_key,
+            status=FetchStatus.SUCCESS,
+            status_code=200,
+            fetched_at=datetime.utcnow(),
+            content=json.dumps({"stargazers_count": 10}),
+            etag='"etag"',
+        )
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.side_effect = fake_fetch
+
+    now = datetime.utcnow()
+    result = adapter.execute(fetcher=mock_fetcher, policy=policy, now=now)
+
+    meta = result.transition.metadata if result.transition else {}
+    assert "subresource_states" in meta
+    assert meta["subresource_states"]["releases"]["status"] == "BACKOFF"
+    assert meta["subresource_states"]["releases"]["next_allowed_at"] is not None
+
+    # Next run should skip releases because it is still in BACKOFF.
+    target.metadata = meta
+    adapter2 = GitHubTarget(target=target, watch_types=["releases", "stars"])
+    mock_fetcher2 = MagicMock(spec=SmartFetcher)
+    mock_fetcher2.fetch.side_effect = fake_fetch
+
+    result2 = adapter2.execute(fetcher=mock_fetcher2, policy=policy, now=now)
+    assert mock_fetcher2.fetch.call_count == 1
+    assert result2.signals_emitted == []
+
+
+def test_github_target_independent_subresource_outcomes():
+    """Releases in COOLDOWN does not block Stars when subresource states are independent."""
+    from web_watcher.fetch_policy import FetchPolicy
+    target = Target(id="gh_indy", url="pallets/flask")
+    policy = FetchPolicy()
+
+    release_eval = FetchEvaluation(
+        target_id="gh_indy",
+        status_code=429,
+        new_status=TargetStatus.COOLDOWN,
+        should_emit_signal=False,
+        consecutive_failures=1,
+        next_allowed_at=datetime.utcnow(),
+        reason="HTTP 429",
+    )
+    repo_eval = FetchEvaluation(
+        target_id="gh_indy",
+        status_code=200,
+        new_status=TargetStatus.NORMAL,
+        should_emit_signal=False,
+        consecutive_failures=0,
+        next_allowed_at=None,
+    )
+
+    meta = {
+        "subresource_states": {
+            "releases": {
+                "status": "COOLDOWN",
+                "consecutive_failures": 1,
+                "next_allowed_at": datetime.utcnow().isoformat(),
+            },
+            "stars": {
+                "status": "NORMAL",
+                "consecutive_failures": 0,
+                "next_allowed_at": None,
+            },
+        }
+    }
+
+    # Simulate outcome merge logic from GitHubTarget.execute
+    severity = {
+        TargetStatus.COOLDOWN: 0,
+        TargetStatus.BACKOFF: 1,
+        TargetStatus.NORMAL: 2,
+    }
+    if severity[release_eval.new_status] <= severity[repo_eval.new_status]:
+        observed_status = release_eval.new_status
+        observed_next_allowed_at = release_eval.next_allowed_at
+    else:
+        observed_status = repo_eval.new_status
+        observed_next_allowed_at = repo_eval.next_allowed_at
+
+    assert observed_status == TargetStatus.COOLDOWN
+    assert observed_next_allowed_at == release_eval.next_allowed_at

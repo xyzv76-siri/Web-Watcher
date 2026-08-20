@@ -508,3 +508,31 @@ def _make_repo_host_limiter():
     repo = Repository(path)
     limiter = HostRateLimiter(repository=repo)
     return repo, limiter, path
+
+def test_host_rate_limiter_reap_stale_claims():
+    repo, limiter, _ = _make_repo_host_limiter()
+    now = datetime.now(timezone.utc)
+    allowed, claim_token, _, _ = limiter.prepare_request("stale.example.com", now)
+    assert allowed is True
+    assert claim_token is not None
+
+    reap_time = now + timedelta(seconds=400)
+    cleaned = repo.reap_stale_claims(older_than=reap_time)
+    assert cleaned == 1
+
+    allowed, _, _, _ = limiter.prepare_request("stale.example.com", reap_time)
+    assert allowed is True
+
+
+def test_host_rate_limiter_active_claim_not_reaped():
+    repo, limiter, _ = _make_repo_host_limiter()
+    now = datetime.now(timezone.utc)
+    allowed, claim_token, _, _ = limiter.prepare_request("active.example.com", now)
+    assert allowed is True
+
+    reap_time = now + timedelta(seconds=100)
+    cleaned = repo.reap_stale_claims(older_than=reap_time)
+    assert cleaned == 0
+
+    allowed, _, _, _ = limiter.prepare_request("active.example.com", reap_time)
+    assert allowed is True

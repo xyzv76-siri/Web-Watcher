@@ -168,6 +168,22 @@ class GitHubTarget:
                 if policy.host_rate_limiter:
                     policy.host_rate_limiter.release_request(host)
 
+        def _should_skip_subresource(name: str, now_dt: datetime) -> bool:
+            states = meta.get("subresource_states", {})
+            state = states.get(name, {})
+            status = state.get("status")
+            next_allowed_iso = state.get("next_allowed_at")
+            if status in ("COOLDOWN", "BACKOFF") and next_allowed_iso:
+                try:
+                    next_allowed = datetime.fromisoformat(next_allowed_iso)
+                    if now_dt.tzinfo is None:
+                        now_dt = now_dt.replace(tzinfo=timezone.utc)
+                    if next_allowed > now_dt:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            return False
+
         # Track outcomes from each sub-fetch to derive the composite outcome.
         release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
         repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
@@ -176,7 +192,7 @@ class GitHubTarget:
 
         try:
             # 2. 检查 Releases
-            if "releases" in self.watch_types:
+            if "releases" in self.watch_types and not _should_skip_subresource("releases", now):
                 rel_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/releases/latest"
                 rel_host = _extract_host(rel_url)
                 if rel_host and policy.host_rate_limiter:
@@ -262,7 +278,7 @@ class GitHubTarget:
                 last_status_code = res.status_code
 
             # 3. 检查 Repo Meta (Stars)
-            if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL:
+            if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL and not _should_skip_subresource("stars", now):
                 repo_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}"
                 repo_host = _extract_host(repo_url)
                 if repo_host and policy.host_rate_limiter:
@@ -368,30 +384,46 @@ class GitHubTarget:
         else:
             outcome = ExecutionOutcome.SUCCESS_UNCHANGED
 
-        # Use the most "severe" evaluation for transition state.
-        # Priority: POLICY_COOLDOWN > TIMEOUT > FETCH_FAILED > TRANSFORM_ERROR > SUCCESS_CHANGED > NOT_MODIFIED > SUCCESS_UNCHANGED
+        # 4-1. Persist per-subresource state in metadata so next run can resume independently.
+        # Priority: COOLDOWN > BACKOFF > NORMAL
+        subresource_states: Dict[str, Dict[str, Any]] = {}
+        if release_eval is not None:
+            next_allowed_iso = None
+            if release_eval.next_allowed_at is not None:
+                next_allowed_iso = release_eval.next_allowed_at.isoformat()
+            subresource_states["releases"] = {
+                "status": release_eval.new_status.value.upper() if hasattr(release_eval.new_status, "value") else str(release_eval.new_status).upper(),
+                "consecutive_failures": release_eval.consecutive_failures,
+                "next_allowed_at": next_allowed_iso,
+            }
+        if repo_eval is not None:
+            next_allowed_iso = None
+            if repo_eval.next_allowed_at is not None:
+                next_allowed_iso = repo_eval.next_allowed_at.isoformat()
+            subresource_states["stars"] = {
+                "status": repo_eval.new_status.value.upper() if hasattr(repo_eval.new_status, "value") else str(repo_eval.new_status).upper(),
+                "consecutive_failures": repo_eval.consecutive_failures,
+                "next_allowed_at": next_allowed_iso,
+            }
+        if subresource_states:
+            meta["subresource_states"] = subresource_states
+
+        # 4-2. Merge subresource states into composite target state.
+        # This is only for scheduling/backoff semantics; signals are independent.
         if release_eval and repo_eval:
-            if release_eval.new_status == TargetStatus.COOLDOWN or repo_eval.new_status == TargetStatus.COOLDOWN:
-                observed_status = TargetStatus.COOLDOWN
-                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = max(
-                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                )
-            elif release_eval.new_status == TargetStatus.BACKOFF or repo_eval.new_status == TargetStatus.BACKOFF:
-                observed_status = TargetStatus.BACKOFF
-                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = max(
-                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                )
+            severity = {
+                TargetStatus.COOLDOWN: 0,
+                TargetStatus.BACKOFF: 1,
+                TargetStatus.NORMAL: 2,
+            }
+            if severity[release_eval.new_status] <= severity[repo_eval.new_status]:
+                observed_status = release_eval.new_status
+                observed_consecutive_failures = release_eval.consecutive_failures
+                observed_next_allowed_at = release_eval.next_allowed_at
             else:
-                observed_status = TargetStatus.NORMAL
-                observed_consecutive_failures = max(release_eval.consecutive_failures, repo_eval.consecutive_failures)
-                observed_next_allowed_at = max(
-                    release_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                    repo_eval.next_allowed_at or datetime.min.replace(tzinfo=timezone.utc),
-                )
+                observed_status = repo_eval.new_status
+                observed_consecutive_failures = repo_eval.consecutive_failures
+                observed_next_allowed_at = repo_eval.next_allowed_at
         elif release_eval:
             observed_status = release_eval.new_status
             observed_consecutive_failures = release_eval.consecutive_failures
@@ -400,6 +432,10 @@ class GitHubTarget:
             observed_status = repo_eval.new_status
             observed_consecutive_failures = repo_eval.consecutive_failures
             observed_next_allowed_at = repo_eval.next_allowed_at
+        else:
+            observed_status = TargetStatus.NORMAL
+            observed_consecutive_failures = 0
+            observed_next_allowed_at = None
 
         # 5. Build transition
         combined_etag = meta.get("release_etag") or meta.get("repo_etag")
@@ -409,7 +445,7 @@ class GitHubTarget:
             now=now,
             etag=combined_etag,
             last_modified=None,
-            metadata=meta if signals else None,
+            metadata=meta if signals or subresource_states else None,
             consecutive_failures=observed_consecutive_failures,
             next_allowed_at=observed_next_allowed_at,
             emit_signal=bool(signals),

@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 from web_watcher.storage import open_database, initialize_schema
-from web_watcher.repository import Repository, SCHEMA_VERSION
+from web_watcher.repository import Repository, SCHEMA_VERSION, utc_now_iso
 
 
 def test_schema_version_table_exists(tmp_path):
@@ -53,6 +53,37 @@ def test_repository_idempotent_on_existing_db(tmp_path):
     Repository(db_path)
 
     # Verify version is still correct
+    repo = Repository(db_path)
+    cursor = repo.connection.execute("SELECT MAX(version) as v FROM schema_version")
+    row = cursor.fetchone()
+    assert row["v"] == SCHEMA_VERSION
+
+
+def test_repository_migration_registry_complete(tmp_path):
+    from web_watcher.repository import Repository
+    registry = Repository.migration_registry()
+    assert set(registry.keys()) == {1, 2, 3}
+    for migration in registry.values():
+        assert migration.name
+        assert migration.up is not None
+        assert migration.checksum is not None
+
+
+def test_repository_migration_checksum_stable(tmp_path):
+    from web_watcher.repository import Repository
+    registry = Repository.migration_registry()
+    checksums = [m.compute_checksum() for m in registry.values()]
+    assert len(checksums) == len(set(checksums))
+
+
+def test_repository_migration_idempotent_on_partial(tmp_path):
+    db_path = tmp_path / "partial.db"
+    conn = open_database(db_path)
+    initialize_schema(conn)
+    conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, ?)", (utc_now_iso(),))
+    conn.commit()
+    conn.close()
+
     repo = Repository(db_path)
     cursor = repo.connection.execute("SELECT MAX(version) as v FROM schema_version")
     row = cursor.fetchone()
