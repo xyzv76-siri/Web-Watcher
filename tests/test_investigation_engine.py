@@ -1,7 +1,4 @@
-"""K.6 Investigation Engine — unit tests.
-
-Covers all Architectural Assertions A–Z from PHASE11A_K6_ARCHITECTURE.md.
-"""
+"""K.6 Investigation Engine — unit tests."""
 
 from __future__ import annotations
 
