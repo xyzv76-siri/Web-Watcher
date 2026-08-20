@@ -4,11 +4,11 @@ Personal technology change monitoring and research system.
 
 [![Python >= 3.11](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://www.python.org/)
 
-## What It Does
+## 功能简介
 
-Web-Watcher continuously monitors target resources, evaluates changes according to policy, and triggers investigation and notification when needed.
+Web-Watcher 持续监控目标资源，按策略评估变化，并在需要时触发调查与通知。
 
-Core pipeline:
+核心流程：
 
 ```
 Target
@@ -20,20 +20,20 @@ Target
 → Notification
 ```
 
-It is not a crawler platform, WAF bypass tool, CAPTCHA bypass tool, or high-concurrency scraper.
+它不是爬虫平台、WAF 绕过工具、CAPTCHA 绕过工具或高并发抓取工具。
 
-## Features
+## 功能特性
 
-* **Web / GitHub monitoring** — Generic web pages via CSS/XPath selectors, and GitHub repositories via official API.
-* **Change detection** — Content fingerprinting, ETag/Last-Modified conditional requests, and diff evaluation.
-* **Persistent state** — SQLite-backed scheduling, signals, events, investigations, and notifications.
-* **Investigation & evidence** — Eligible events trigger investigation; results and evidence are persisted for audit.
-* **Notifications** — At-least-once delivery via Console, Webhook, Slack, Lark, and DingTalk.
-* **Recovery** — Crash-safe state persistence with automatic schema initialization and stale claim cleanup.
-* **Multi-worker safety** — Serialized target claiming via SQLite locking; duplicate claims are rejected.
-* **Docker deployment** — Production-oriented image with non-root user, volume-mounted `/data` and `/logs`, and graceful shutdown.
+* **Web / GitHub 监控** — 通过 CSS/XPath 选择器监控通用网页，并通过 GitHub 官方 API 监控仓库。
+* **变更检测** — 内容指纹、ETag/Last-Modified 条件请求与差异评估。
+* **持久化状态** — 基于 SQLite 的调度、信号、事件、调查与通知存储。
+* **调查与证据** — 符合条件的事件会触发调查；结果和证据会被持久化以供审计。
+* **通知** — 至少一次投递，支持 Console、Webhook、Slack、Lark 和 DingTalk。
+* **恢复能力** — 防崩溃状态持久化，自动 schema 初始化与过期声明清理。
+* **多 Worker 安全** — 通过 SQLite 锁串行化目标声明；重复声明会被拒绝。
+* **Docker 部署** — 非 root 用户镜像，挂载 `/data` 和 `/logs` 卷。
 
-## Architecture
+## 架构
 
 ```mermaid
 flowchart LR
@@ -45,40 +45,40 @@ flowchart LR
     F --> G[Notification]
 ```
 
-## Requirements
+## 环境要求
 
 * Python >= 3.11
 * SQLite 3
-* Optional: GitHub Personal Access Token (for monitoring GitHub repositories)
+* 可选：GitHub Personal Access Token（用于监控 GitHub 仓库）
 
-Runtime dependencies (from `pyproject.toml`):
+运行时依赖：
 
 * `requests >= 2.0`
 * `pyyaml >= 6.0`
 
-Development dependency:
+开发依赖：
 
 * `pytest >= 7.0`
 
-## Installation
+## 安装
 
 ```bash
 python -m pip install --no-deps -e .
 ```
 
-## Quick Start
+## 快速开始
 
 ```bash
-# Run a single monitoring pipeline cycle
+# 运行一次监控流程
 python -m web_watcher.cli run --once
 
-# Run system self-check
+# 运行系统自检
 python -m web_watcher.cli doctor
 ```
 
-## Configuration
+## 配置
 
-Configuration file: `config/watcher.json`
+配置文件：`config/watcher.json`
 
 ```json
 {
@@ -87,58 +87,58 @@ Configuration file: `config/watcher.json`
 }
 ```
 
-Environment variables:
+环境变量：
 
-| Variable | Default | Description |
+| 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
-| `WEB_WATCHER_DB` | `web_watcher.db` | SQLite database path |
-| `WEB_WATCHER_COOLDOWN` | `300` | Default cooldown seconds |
-| `WEB_WATCHER_POLL_INTERVAL` | `1.0` | Polling interval seconds |
-| `WEB_WATCHER_BATCH_SIZE` | `10` | Batch size for events/notifications |
-| `WEB_WATCHER_MAX_RETRIES` | `3` | Maximum retry count |
-| `WEB_WATCHER_BASE_BACKOFF` | `1.0` | Base backoff seconds |
-| `WEB_WATCHER_LOG_LEVEL` | `INFO` | Logging level |
-| `WEB_WATCHER_WEBHOOK_URL` | — | Webhook endpoint |
-| `WEB_WATCHER_RETENTION_MAX_AGE_DAYS` | `30` | Data retention days |
-| `WEB_WATCHER_RETENTION_DRY_RUN` | `false` | Retention dry run |
-| `WEB_WATCHER_RULES` | — | Rules file path |
-| `GITHUB_TOKEN` | — | GitHub API token |
+| `WEB_WATCHER_DB` | `web_watcher.db` | SQLite 数据库路径 |
+| `WEB_WATCHER_COOLDOWN` | `300` | 默认冷却时间（秒） |
+| `WEB_WATCHER_POLL_INTERVAL` | `1.0` | 轮询间隔（秒） |
+| `WEB_WATCHER_BATCH_SIZE` | `10` | 事件/通知批次大小 |
+| `WEB_WATCHER_MAX_RETRIES` | `3` | 最大重试次数 |
+| `WEB_WATCHER_BASE_BACKOFF` | `1.0` | 基础退避时间（秒） |
+| `WEB_WATCHER_LOG_LEVEL` | `INFO` | 日志级别 |
+| `WEB_WATCHER_WEBHOOK_URL` | — | Webhook 地址 |
+| `WEB_WATCHER_RETENTION_MAX_AGE_DAYS` | `30` | 数据保留天数 |
+| `WEB_WATCHER_RETENTION_DRY_RUN` | `false` | 保留策略演练模式 |
+| `WEB_WATCHER_RULES` | — | 规则文件路径 |
+| `GITHUB_TOKEN` | — | GitHub API 令牌 |
 
-## Usage
+## 使用方式
 
 ### CLI
 
 ```bash
-# Single pipeline cycle
+# 单次流程
 python -m web_watcher.cli run --once
 
-# Continuous daemon mode
+# 持续守护进程模式
 python -m web_watcher.cli daemon --interval 5.0
 
-# Investigation worker
+# 调查 Worker
 python -m web_watcher.cli worker --once --batch-size 5
 
-# Notification dispatcher
+# 通知分发器
 python -m web_watcher.cli notify --once --interval 2.0
 
-# Export audit report
+# 导出审计报告
 python -m web_watcher.cli export
 
-# Test a rule file
+# 测试规则文件
 python -m web_watcher.cli test-rule path/to/rules.yaml
 
-# System doctor
+# 系统自检
 python -m web_watcher.cli doctor --verbose
 ```
 
-### Targets
+### 监控目标
 
-* **Generic Web** — CSS/XPath extraction, content normalization, canonical fingerprint, dynamic noise suppression.
-* **GitHub API** — Official API for `releases/latest`, stars, and metadata with ETag + 304 support.
+* **通用网页** — CSS/XPath 提取、内容规范化、规范指纹、动态噪声抑制。
+* **GitHub API** — 通过官方 API 获取 `releases/latest`、stars 和元数据，支持 ETag + 304。
 
-### Notification Channels
+### 通知渠道
 
-Built-in channels:
+内置渠道：
 
 * Console
 * Webhook
@@ -146,7 +146,7 @@ Built-in channels:
 * Lark
 * DingTalk
 
-## Deployment
+## 部署
 
 ### Docker
 
@@ -154,64 +154,64 @@ Built-in channels:
 docker compose up -d
 ```
 
-Health check:
+健康检查：
 
 ```bash
 docker compose exec web-watcher python -m web_watcher.cli doctor
 ```
 
-Configuration and persistence follow the repository `docker-compose.yml` and `Dockerfile`.
+配置与持久化遵循仓库中的 `docker-compose.yml` 和 `Dockerfile`。
 
-## Reliability & Security
+## 可靠性与安全性
 
-### HTTP Semantics
+### HTTP 语义
 
-| Status | Handling |
+| 状态 | 处理方式 |
 |--------|----------|
-| 200 | Extract, normalize, fingerprint, diff; may produce Signal |
-| 304 | Short-circuit; retain ETag/Last-Modified; no Signal |
-| 301/302/307/308 | Record redirect metadata; do not follow automatically |
-| 403 | Forbidden; do not retry; no Signal |
-| 404 | Not found; do not retry; no Signal |
-| 429 | Parse Retry-After; update `next_allowed_at`;阶梯 cooldown |
-| 5xx / timeout / DNS failure | Increment `consecutive_failures`; enter backoff/cooldown |
+| 200 | 提取、规范化、指纹、差异；可能产生 Signal |
+| 304 | 短路；保留 ETag/Last-Modified；不产生 Signal |
+| 301/302/307/308 | 记录重定向元数据；不自动跟随 |
+| 403 | 禁止；不重试；不产生 Signal |
+| 404 | 未找到；不重试；不产生 Signal |
+| 429 | 解析 Retry-After；更新 `next_allowed_at`；阶梯式冷却 |
+| 5xx / 超时 / DNS 失败 | 增加 `consecutive_failures`；进入退避/冷却 |
 
-### Security Boundaries
+### 安全边界
 
-* No WAF bypass
-* No CAPTCHA bypass
-* No TLS fingerprint spoofing
-* No proxy rotation for evasion
-* GitHub access only via official API
+* 不绕过 WAF
+* 不绕过 CAPTCHA
+* 不伪造 TLS 指纹
+* 不为规避目的配置代理轮换
+* GitHub 访问仅通过官方 API
 
-### Implementation Details
+### 实现细节
 
-* **Deterministic jitter** — Backoff delay is derived via SHA-256, not random numbers, making jitter reproducible for the same target and timestamp.
-* **Claim fencing** — Every claim carries a unique `claim_token`; stale workers cannot mutate leases held by new workers.
-* **Atomic finalization** — `finalize_execution()` completes fencing, target update, signal insert, event create/update, and link create in a single transaction; any failure triggers SQLite rollback.
-* **Host claim lease** — `host_rate_limits` records per-host claims with atomic acquire and `claim_until` expiry; crashed workers leave leases that expire automatically.
-* **Stale lease recovery** — `ScheduledRunner.run_once()` reaps expired leases on every startup without external cron or manual intervention.
+* **确定性抖动** — 退避延迟通过 SHA-256 派生，而非随机数，使同一目标和时间戳下的抖动可复现。
+* **声明围栏** — 每个声明都携带唯一的 `claim_token`；过期 Worker 无法修改新 Worker 持有的租约。
+* **原子完成** — `finalize_execution()` 在单个事务中完成围栏、目标更新、信号插入、事件创建/更新和链接创建；任何失败都会触发 SQLite 回滚。
+* **主机声明租约** — `host_rate_limits` 记录每台主机的声明，支持原子获取和 `claim_until` 过期；崩溃的 Worker 会留下自动过期的租约。
+* **过期租约恢复** — `ScheduledRunner.run_once()` 在每次启动时清理过期租约，无需外部 cron 或手动干预。
 
-### Limitations
+### 限制
 
-* SQLite is single-node persistence; not distributed.
-* External notification is at-least-once, not exactly-once.
-* GitHub API rate limits are subject to upstream constraints.
-* Extraction failure does not imply deletion.
-* No cross-process exactly-once distributed transaction.
+* SQLite 是单节点持久化，非分布式。
+* 外部通知是至少一次，非恰好一次。
+* GitHub API 速率限制受上游约束。
+* 提取失败不意味着删除。
+* 无跨进程恰好一次分布式事务。
 
-## Open Source Scope
+## 开源范围
 
-This repository publicly releases Web-Watcher's reusable software implementation, test code, public documentation, configuration templates, and related engineering components.
+本仓库公开发布 Web-Watcher 的可复用软件实现、测试代码、公开文档、配置模板及相关工程组件。
 
-The open source repository maintains a clear separation from actual production environments.
+开源仓库与实际生产环境保持清晰分离。
 
-**In scope:** source code, tests, public documentation, configuration templates, schemas, sample data, and CI/CD templates.
+**范围内：** 源代码、测试、公开文档、配置模板、schema、示例数据和 CI/CD 模板。
 
-**Out of scope:** tokens, keys, production credentials, private data, production logs, and infrastructure configurations.
+**范围外：** 令牌、密钥、生产凭据、私有数据、生产日志和基础设施配置。
 
-Environment-specific configuration should be provided via environment variables or secret management, not by committing real credentials.
+环境特定配置应通过环境变量或密钥管理提供，而非提交真实凭据。
 
-## License
+## 许可证
 
-License information will be added when the repository license file is finalized.
+许可证信息将在仓库许可证文件最终确定后添加。
