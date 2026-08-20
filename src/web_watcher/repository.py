@@ -3,8 +3,7 @@
 import json
 import logging
 import sqlite3
-
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, Dict, List, Any, Tuple
 
 from .models import Entity, Event, FetchState, Notification, Signal
@@ -175,7 +174,7 @@ def _deserialize_importance(val: str) -> Importance:
         return Importance.INTERESTING
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Repository:
@@ -213,6 +212,8 @@ class Repository:
             self._init_notification_table()
         if version == 2:
             self._init_host_rate_limit_table()
+        if version == 3:
+            self._init_host_rate_limit_claim_until()
         # Future migrations go here
 
     def create_entity(
@@ -1069,10 +1070,20 @@ class Repository:
                 host TEXT PRIMARY KEY,
                 next_allowed_at TEXT,
                 claim_token TEXT,
-                claimed_at TEXT
+                claimed_at TEXT,
+                claim_until TEXT
             )
         """)
         self.connection.commit()
+
+    def _init_host_rate_limit_claim_until(self):
+        """Migration v3: add claim_until column to host_rate_limits."""
+        try:
+            self.connection.execute("ALTER TABLE host_rate_limits ADD COLUMN claim_until TEXT")
+            self.connection.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
 
     def acquire_host_request(
         self,
@@ -1082,7 +1093,11 @@ class Repository:
     ) -> Tuple[bool, Optional[str], Optional[float]]:
         """
         Atomically acquire permission to send an HTTP request to a host.
-        Uses a claim_token lease to prevent concurrent requests to the same host.
+
+        Succeeds only when:
+          - no active claim exists for the host, or the existing claim has expired
+          - next_allowed_at is NULL or has passed
+
         Returns (allowed, claim_token, wait_seconds).
         """
         import uuid
@@ -1094,50 +1109,65 @@ class Repository:
         now_dt = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
         now_iso = now_dt.isoformat()
         claim_token = str(uuid.uuid4())
+        claim_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
 
         with self.connection:
             cursor = self.connection.cursor()
-            # Try to acquire: update existing row only if next_allowed_at has passed
             cursor.execute("""
                 UPDATE host_rate_limits
-                SET claim_token = ?, claimed_at = ?
-                WHERE host = ? AND (next_allowed_at IS NULL OR next_allowed_at <= ?)
-            """, (claim_token, now_iso, host, now_iso))
+                SET claim_token = ?, claimed_at = ?, claim_until = ?
+                WHERE host = ?
+                  AND (claim_token IS NULL OR claim_until <= ?)
+                  AND (next_allowed_at IS NULL OR next_allowed_at <= ?)
+            """, (claim_token, now_iso, claim_until, host, now_iso, now_iso))
 
             if cursor.rowcount:
                 return True, claim_token, None
 
-            # Row exists but next_allowed_at is in the future
+            # Determine why acquire failed: active claim or rate-limit window
             row = cursor.execute("""
-                SELECT next_allowed_at FROM host_rate_limits WHERE host = ?
+                SELECT next_allowed_at, claim_token, claim_until
+                FROM host_rate_limits
+                WHERE host = ?
             """, (host,)).fetchone()
-            if row and row["next_allowed_at"]:
-                try:
-                    next_allowed = datetime.fromisoformat(row["next_allowed_at"])
-                    remaining = max(0.0, (next_allowed - now_dt).total_seconds())
-                    return False, None, remaining
-                except ValueError:
-                    pass
 
-            # No row exists, insert one
+            if row:
+                # If there is an active claim, the caller must wait for the claim lease
+                if row["claim_token"] is not None and row["claim_until"] is not None:
+                    try:
+                        claim_until_dt = datetime.fromisoformat(row["claim_until"])
+                        remaining = max(0.0, (claim_until_dt - now_dt).total_seconds())
+                        return False, None, remaining
+                    except ValueError:
+                        pass
+
+                if row["next_allowed_at"] is not None:
+                    try:
+                        next_allowed = datetime.fromisoformat(row["next_allowed_at"])
+                        remaining = max(0.0, (next_allowed - now_dt).total_seconds())
+                        return False, None, remaining
+                    except ValueError:
+                        pass
+
+            # No row exists; insert a new unclaimed row
             cursor.execute("""
-                INSERT INTO host_rate_limits (host, claim_token, claimed_at)
-                VALUES (?, ?, ?)
-            """, (host, claim_token, now_iso))
+                INSERT INTO host_rate_limits (host, claim_token, claimed_at, claim_until)
+                VALUES (?, ?, ?, ?)
+            """, (host, claim_token, now_iso, claim_until))
             return True, claim_token, None
 
     def release_host_request(self, host: str, claim_token: str) -> bool:
-        """Release a host request claim if the token matches."""
+        """Release a host request claim only if the token matches."""
         with self.connection:
             cursor = self.connection.execute("""
                 UPDATE host_rate_limits
-                SET claim_token = NULL, claimed_at = NULL
+                SET claim_token = NULL, claimed_at = NULL, claim_until = NULL
                 WHERE host = ? AND claim_token = ?
             """, (host, claim_token))
             return cursor.rowcount > 0
 
     def update_host_next_allowed(self, host: str, next_allowed_at: Optional[datetime]) -> None:
-        """Update the next allowed time for a host."""
+        """Update the next allowed time for a host and clear the active claim."""
         if not host:
             return
         now_iso = utc_now_iso()
@@ -1148,8 +1178,36 @@ class Repository:
                 VALUES (?, ?, ?)
                 ON CONFLICT(host) DO UPDATE SET
                     next_allowed_at = excluded.next_allowed_at,
-                    claimed_at = excluded.claimed_at
+                    claimed_at = excluded.claimed_at,
+                    claim_token = NULL,
+                    claim_until = NULL
             """, (host, next_allowed_iso, now_iso))
+
+    def reap_stale_claims(self, older_than: Optional[datetime] = None) -> int:
+        """Clear expired claims. Returns number of rows updated."""
+        if older_than is None:
+            older_than = utc_now()
+        cutoff_iso = older_than.isoformat()
+        with self.connection:
+            cursor = self.connection.execute("""
+                UPDATE host_rate_limits
+                SET claim_token = NULL, claimed_at = NULL, claim_until = NULL
+                WHERE claim_until IS NOT NULL AND claim_until <= ?
+            """, (cutoff_iso,))
+            return cursor.rowcount
+
+    def renew_host_request(self, host: str, claim_token: str, now: datetime, lease_seconds: float = 300.0) -> bool:
+        """Renew an existing claim's lease. Returns True if the claim was renewed."""
+        now_dt = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        now_iso = now_dt.isoformat()
+        new_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self.connection:
+            cursor = self.connection.execute("""
+                UPDATE host_rate_limits
+                SET claimed_at = ?, claim_until = ?
+                WHERE host = ? AND claim_token = ?
+            """, (now_iso, new_until, host, claim_token))
+            return cursor.rowcount > 0
 
     def save_target(self, target: Any) -> None:
         self._init_target_table()

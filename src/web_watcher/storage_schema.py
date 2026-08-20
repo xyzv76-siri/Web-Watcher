@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS host_rate_limits (
     host TEXT PRIMARY KEY,
     next_allowed_at TEXT,
     claim_token TEXT,
-    claimed_at TEXT
+    claimed_at TEXT,
+    claim_until TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_entity

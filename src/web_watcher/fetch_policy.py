@@ -116,7 +116,7 @@ class FetchPolicy:
         self.cooldown_ladder = cooldown_ladder or [1800.0, 3600.0, 7200.0, 14400.0]
         self.jitter_ratio = jitter_ratio
         self.retry_after_cap_sec = retry_after_cap_sec
-        self.host_rate_limiter = host_rate_limiter or HostRateLimiter()
+        self.host_rate_limiter = host_rate_limiter
 
     def prepare_request(self, target: Target, now: Optional[datetime] = None) -> FetchDecision:
         now_dt = _to_utc_aware(now) or datetime.now(timezone.utc)
@@ -135,7 +135,7 @@ class FetchPolicy:
         # 2. 检查 host-level rate limit
         host = _extract_host(target.url)
         claim_token = None
-        if host:
+        if host and self.host_rate_limiter is not None:
             allowed, claim_token, remaining, reason = self.host_rate_limiter.prepare_request(host, now_dt)
             if not allowed:
                 return FetchDecision(
@@ -184,7 +184,8 @@ class FetchPolicy:
         # A. 304 Not Modified: 协商缓存命中，直接短路
         if status_code == 304:
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
+            if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=304,
@@ -201,7 +202,8 @@ class FetchPolicy:
         if status_code in (301, 302, 303, 307, 308):
             redirect_url = (headers_map.get("location") or "").strip()
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
+            if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             if status_code == 301 and redirect_url:
                 # Permanent redirect: update target URL
                 return FetchEvaluation(
@@ -232,7 +234,8 @@ class FetchPolicy:
             res_etag = headers_map.get("etag") or target.etag
             res_last_mod = headers_map.get("last-modified") or target.last_modified
             next_allowed = now_dt + timedelta(seconds=interval_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
+            if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), None)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=status_code,
@@ -250,7 +253,8 @@ class FetchPolicy:
             failures = target.consecutive_failures + 1
             cd_sec = self.cooldown_ladder[0]
             next_allowed = now_dt + timedelta(seconds=cd_sec)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+            if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=403,
@@ -301,7 +305,8 @@ class FetchPolicy:
                 if retry_after_sec is not None:
                     cd_sec = max(cd_sec, retry_after_sec)
                 next_allowed = now_dt + timedelta(seconds=cd_sec)
-                self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+                if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
                 return FetchEvaluation(
                     target_id=target.id,
                     status_code=429,
@@ -315,7 +320,8 @@ class FetchPolicy:
             if retry_after_sec is not None:
                 bounded_delay = max(1.0, min(retry_after_sec, self.retry_after_cap_sec))
                 next_allowed = now_dt + timedelta(seconds=bounded_delay)
-                self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+                if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
                 return FetchEvaluation(
                     target_id=target.id,
                     status_code=429,
@@ -331,7 +337,8 @@ class FetchPolicy:
             jitter = _deterministic_jitter(target.id, failures, status_code, raw_backoff, self.jitter_ratio)
             delay = max(1.0, raw_backoff + jitter)
             next_allowed = now_dt + timedelta(seconds=delay)
-            self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
+            if self.host_rate_limiter is not None:
+                    self.host_rate_limiter.update_after_response(_extract_host(target.url), next_allowed)
             return FetchEvaluation(
                 target_id=target.id,
                 status_code=429,

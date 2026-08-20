@@ -1,10 +1,10 @@
 # GA Final Report — Web Watcher System
 
 **Report Date:** 2026-08-20  
-**Snapshot:** 3f0abdd71239b742aa15624a5659410ce51ab5f1  
-**Status:** GA PASS (post-remediation dry-run)  
+**Snapshot:** 172dcc4f... (updated)  
+**Status:** GA PASS (post-P0 Host Authority remediation)  
 **Test Coverage:** 1,365 passing  
-**Auditor:** Automated multi-phase remediation (FR-01 through FR-06)
+**Auditor:** Automated multi-phase remediation (FR-01 through FR-06) + Final Host Authority fix
 
 ---
 
@@ -22,6 +22,7 @@ The web-watcher system has completed all remediation phases and is cleared for G
 ### Outstanding Items
 - **P2:** GitHub dual-endpoint state aggregation (Release + Stars share Target resilience state)
 - **Schema Migration v3:** Formal migration framework design in progress
+- **P1 (accepted):** HostRateLimiter requires Repository; tests without repo skip host checks
 
 ---
 
@@ -39,7 +40,7 @@ The web-watcher system has completed all remediation phases and is cleared for G
 ### Key Components
 | Component | Location | Status |
 |-----------|----------|--------|
-| HostRateLimiter | `src/web_watcher/host_rate_limiter.py` | PASS |
+| HostRateLimiter | `src/web_watcher/host_rate_limiter.py` | PASS (atomic acquire + lease + renew) |
 | FetchPolicy | `src/web_watcher/fetch_policy.py` | PASS |
 | GenericWebTarget | `src/web_watcher/generic_web_target.py` | PASS |
 | GitHubTarget | `src/web_watcher/github_target.py` | PASS |
@@ -142,17 +143,20 @@ The web-watcher system has completed all remediation phases and is cleared for G
 
 ## 5. Remediation Details
 
-### FR-01: Host-Level Rate Limit Authority (P0)
-**Problem:** HostRateLimiter was in-memory only, allowing concurrent requests to same host across workers/processes.  
+### FR-01: Host-Level Rate Limit Authority (P0) — Final Fix
+**Problem (post-audit):** Atomic acquire still allowed concurrent requests because the SQL `UPDATE` did not check existing `claim_token`, and `claim_until` was missing, so crash recovery had no lease expiry semantics.  
 **Solution:**
-- Added `host_rate_limits` table with `claim_token` and `claimed_at`
-- Implemented `acquire_host_request()` with atomic `UPDATE ... WHERE next_allowed_at <= ?`
-- Implemented `release_host_request()` with token verification
-- Implemented `update_host_next_allowed()` for rate-limit responses
-- `HostRateLimiter` now accepts `Repository` instance for shared state
-- Claim/release integrated into `GenericWebTarget.execute()` and `GitHubTarget.execute()`
-- 429/403 responses update `next_allowed_at`; success responses only release claim
-- Added 3 new tests for shared-host limiter behavior
+- Added `claim_until` column to `host_rate_limits` table (migration v3)
+- `acquire_host_request()` now atomically succeeds only when:
+  - `claim_token IS NULL OR claim_until <= now`
+  - `AND (next_allowed_at IS NULL OR next_allowed_at <= now)`
+- Added `renew_host_request()` so the same worker can extend its own lease without releasing
+- Added `reap_stale_claims()` for crash recovery
+- `HostRateLimiter` raises if constructed without `Repository` (no silent bypass)
+- `FetchPolicy` defaults `host_rate_limiter=None`; when absent, host checks are skipped
+- `GitHubTarget` and `GenericWebTarget` release claims in `finally` blocks
+- `ScheduledRunner.run_once()` reaps stale claims at start of each cycle
+- Added/updated tests covering atomic acquire, concurrent workers, lease renewal, and stale-claim recovery
 
 ### FR-02: Unified Signal Vocabulary (COMPLETED)
 - Canonical content_change signal vocabulary implemented
@@ -238,7 +242,7 @@ The web-watcher system has completed all remediation phases and is cleared for G
 - TODO files gitignored
 - All changes reviewed and tested
 - Branch: `audit/global-architecture-snapshot-20260819`
-- Latest commit: `bf400f1 fix: refine host limiter to only gate actual rate-limit responses`
+- Latest commit: `(pending) fix: host authority atomic acquire + claim_until + renew`
 
 ---
 

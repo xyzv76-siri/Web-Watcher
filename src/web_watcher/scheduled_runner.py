@@ -295,6 +295,13 @@ class ScheduledRunner:
         if self.rules_path:
             self.sync_rules(self.rules_path)
 
+        # 1.1 Reap stale host claims so crashed workers do not block future requests.
+        if self.repo is not None and hasattr(self.repo, "reap_stale_claims"):
+            try:
+                self.repo.reap_stale_claims(older_than=now)
+            except Exception:
+                pass
+
         # 2. Claim：生产路径必须通过 lease/fencing
         claimed: List[Any] = []
         if self.repo and hasattr(self.repo, "claim_targets"):

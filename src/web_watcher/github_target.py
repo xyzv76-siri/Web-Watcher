@@ -157,6 +157,16 @@ class GitHubTarget:
         is_any_304 = False
         last_status_code = 200
         fetch_error: Optional[str] = None
+        claimed_hosts: List[str] = []
+
+        def _claim(host: Optional[str]) -> None:
+            if host:
+                claimed_hosts.append(host)
+
+        def _release_claims() -> None:
+            for host in claimed_hosts:
+                if policy.host_rate_limiter:
+                    policy.host_rate_limiter.release_request(host)
 
         # Track outcomes from each sub-fetch to derive the composite outcome.
         release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
@@ -164,176 +174,181 @@ class GitHubTarget:
         release_eval = None
         repo_eval = None
 
-        # 2. 检查 Releases
-        if "releases" in self.watch_types:
-            rel_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/releases/latest"
-            rel_host = _extract_host(rel_url)
-            if rel_host and policy.host_rate_limiter:
-                allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(rel_host, now)
-                if not allowed:
-                    return GitHubTargetExecutionResult(
-                        target_id=self.target.id,
-                        allowed=False,
-                        status_code=None,
-                        new_status=self.target.status,
-                        signals_emitted=[],
-                        reason=f"Host '{rel_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
-                        outcome=ExecutionOutcome.POLICY_BLOCKED,
-                        transition=transition_for(
-                            ExecutionOutcome.POLICY_BLOCKED,
-                            target=self.target,
-                            now=now,
-                        ),
-                    )
+        try:
+            # 2. 检查 Releases
+            if "releases" in self.watch_types:
+                rel_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/releases/latest"
+                rel_host = _extract_host(rel_url)
+                if rel_host and policy.host_rate_limiter:
+                    allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(rel_host, now)
+                    if not allowed:
+                        return GitHubTargetExecutionResult(
+                            target_id=self.target.id,
+                            allowed=False,
+                            status_code=None,
+                            new_status=self.target.status,
+                            signals_emitted=[],
+                            reason=f"Host '{rel_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                            outcome=ExecutionOutcome.POLICY_BLOCKED,
+                            transition=transition_for(
+                                ExecutionOutcome.POLICY_BLOCKED,
+                                target=self.target,
+                                now=now,
+                            ),
+                        )
+                    _claim(rel_host)
 
-            rel_etag = meta.get("release_etag")
-            res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
+                rel_etag = meta.get("release_etag")
+                res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
 
-            headers_map = {}
-            if isinstance(res.metadata, dict):
-                headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
-            release_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+                headers_map = {}
+                if isinstance(res.metadata, dict):
+                    headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+                release_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
 
-            if res.error:
-                fetch_error = res.error
+                if res.error:
+                    fetch_error = res.error
 
-            if res.status == FetchStatus.NOT_MODIFIED:
-                is_any_304 = True
-                release_outcome = ExecutionOutcome.NOT_MODIFIED
-            elif res.status_code == 200 and res.content:
-                try:
-                    rel_data = json.loads(res.content)
-                except (json.JSONDecodeError, ValueError):
-                    release_outcome = ExecutionOutcome.TRANSFORM_ERROR
-                else:
-                    tag_name = rel_data.get("tag_name")
-                    prev_tag = meta.get("last_release_tag")
-
-                    meta["release_etag"] = res.etag
-                    meta["last_release_tag"] = tag_name
-
-                    if prev_tag is not None and prev_tag != tag_name and tag_name is not None:
-                        payload = {
-                            "owner": self.owner,
-                            "repo": self.repo_name,
-                            "tag_name": tag_name,
-                            "release_name": rel_data.get("name"),
-                            "html_url": rel_data.get("html_url"),
-                            "published_at": rel_data.get("published_at"),
-                            "body": rel_data.get("body", "")[:500],
-                            "source": rel_url,
-                            "fetched_at": now.isoformat(),
-                        }
-                        if not self._is_duplicate_signal(SignalType.RELEASE_PUBLISHED, payload, meta):
-                            sig = self._create_signal(
-                                SignalType.RELEASE_PUBLISHED,
-                                payload,
-                                now,
-                            )
-                            signals.append(sig)
-                            self._record_signal_fingerprint(SignalType.RELEASE_PUBLISHED, payload, meta)
-                            release_outcome = ExecutionOutcome.SUCCESS_CHANGED
-                        else:
-                            release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                if res.status == FetchStatus.NOT_MODIFIED:
+                    is_any_304 = True
+                    release_outcome = ExecutionOutcome.NOT_MODIFIED
+                elif res.status_code == 200 and res.content:
+                    try:
+                        rel_data = json.loads(res.content)
+                    except (json.JSONDecodeError, ValueError):
+                        release_outcome = ExecutionOutcome.TRANSFORM_ERROR
                     else:
-                        release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
-            else:
-                # Non-200, non-304 release response
-                if release_eval and release_eval.new_status == TargetStatus.COOLDOWN:
-                    release_outcome = ExecutionOutcome.POLICY_COOLDOWN
-                elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
-                    release_outcome = ExecutionOutcome.TIMEOUT
-                elif res.error or (res.status_code is not None and res.status_code >= 400):
-                    release_outcome = ExecutionOutcome.FETCH_FAILED
-                else:
-                    release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
-            last_status_code = res.status_code
+                        tag_name = rel_data.get("tag_name")
+                        prev_tag = meta.get("last_release_tag")
 
-        # 3. 检查 Repo Meta (Stars)
-        if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL:
-            repo_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}"
-            repo_host = _extract_host(repo_url)
-            if repo_host and policy.host_rate_limiter:
-                allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(repo_host, now)
-                if not allowed:
-                    return GitHubTargetExecutionResult(
-                        target_id=self.target.id,
-                        allowed=False,
-                        status_code=None,
-                        new_status=self.target.status,
-                        signals_emitted=[],
-                        reason=f"Host '{repo_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
-                        outcome=ExecutionOutcome.POLICY_BLOCKED,
-                        transition=transition_for(
-                            ExecutionOutcome.POLICY_BLOCKED,
-                            target=self.target,
-                            now=now,
-                        ),
-                    )
+                        meta["release_etag"] = res.etag
+                        meta["last_release_tag"] = tag_name
 
-            repo_etag = meta.get("repo_etag")
-            res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
-
-            headers_map = {}
-            if isinstance(res.metadata, dict):
-                headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
-            repo_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
-
-            if res.error:
-                fetch_error = res.error
-
-            if res.status == FetchStatus.NOT_MODIFIED:
-                is_any_304 = True
-                repo_outcome = ExecutionOutcome.NOT_MODIFIED
-            elif res.status_code == 200 and res.content:
-                try:
-                    repo_data = json.loads(res.content)
-                    stars = int(repo_data.get("stargazers_count") or 0)
-                    prev_stars = meta.get("last_stars")
-
-                    meta["repo_etag"] = res.etag
-                    meta["last_stars"] = stars
-
-                    if prev_stars is not None:
-                        delta = stars - prev_stars
-                        if abs(delta) >= self.star_delta_threshold:
+                        if prev_tag is not None and prev_tag != tag_name and tag_name is not None:
                             payload = {
                                 "owner": self.owner,
                                 "repo": self.repo_name,
-                                "old_stars": prev_stars,
-                                "new_stars": stars,
-                                "delta": delta,
-                                "source": repo_url,
+                                "tag_name": tag_name,
+                                "release_name": rel_data.get("name"),
+                                "html_url": rel_data.get("html_url"),
+                                "published_at": rel_data.get("published_at"),
+                                "body": rel_data.get("body", "")[:500],
+                                "source": rel_url,
                                 "fetched_at": now.isoformat(),
                             }
-                            if not self._is_duplicate_signal(SignalType.STARS_CHANGED, payload, meta):
+                            if not self._is_duplicate_signal(SignalType.RELEASE_PUBLISHED, payload, meta):
                                 sig = self._create_signal(
-                                    SignalType.STARS_CHANGED,
+                                    SignalType.RELEASE_PUBLISHED,
                                     payload,
                                     now,
                                 )
                                 signals.append(sig)
-                                self._record_signal_fingerprint(SignalType.STARS_CHANGED, payload, meta)
-                                repo_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                                self._record_signal_fingerprint(SignalType.RELEASE_PUBLISHED, payload, meta)
+                                release_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                            else:
+                                release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                        else:
+                            release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                else:
+                    # Non-200, non-304 release response
+                    if release_eval and release_eval.new_status == TargetStatus.COOLDOWN:
+                        release_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                    elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                        release_outcome = ExecutionOutcome.TIMEOUT
+                    elif res.error or (res.status_code is not None and res.status_code >= 400):
+                        release_outcome = ExecutionOutcome.FETCH_FAILED
+                    else:
+                        release_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                last_status_code = res.status_code
+
+            # 3. 检查 Repo Meta (Stars)
+            if "stars" in self.watch_types and self.target.status == TargetStatus.NORMAL:
+                repo_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}"
+                repo_host = _extract_host(repo_url)
+                if repo_host and policy.host_rate_limiter:
+                    allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(repo_host, now)
+                    if not allowed:
+                        return GitHubTargetExecutionResult(
+                            target_id=self.target.id,
+                            allowed=False,
+                            status_code=None,
+                            new_status=self.target.status,
+                            signals_emitted=[],
+                            reason=f"Host '{repo_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                            outcome=ExecutionOutcome.POLICY_BLOCKED,
+                            transition=transition_for(
+                                ExecutionOutcome.POLICY_BLOCKED,
+                                target=self.target,
+                                now=now,
+                            ),
+                        )
+                    _claim(repo_host)
+
+                repo_etag = meta.get("repo_etag")
+                res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
+
+                headers_map = {}
+                if isinstance(res.metadata, dict):
+                    headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+                repo_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+                if res.error:
+                    fetch_error = res.error
+
+                if res.status == FetchStatus.NOT_MODIFIED:
+                    is_any_304 = True
+                    repo_outcome = ExecutionOutcome.NOT_MODIFIED
+                elif res.status_code == 200 and res.content:
+                    try:
+                        repo_data = json.loads(res.content)
+                        stars = int(repo_data.get("stargazers_count") or 0)
+                        prev_stars = meta.get("last_stars")
+
+                        meta["repo_etag"] = res.etag
+                        meta["last_stars"] = stars
+
+                        if prev_stars is not None:
+                            delta = stars - prev_stars
+                            if abs(delta) >= self.star_delta_threshold:
+                                payload = {
+                                    "owner": self.owner,
+                                    "repo": self.repo_name,
+                                    "old_stars": prev_stars,
+                                    "new_stars": stars,
+                                    "delta": delta,
+                                    "source": repo_url,
+                                    "fetched_at": now.isoformat(),
+                                }
+                                if not self._is_duplicate_signal(SignalType.STARS_CHANGED, payload, meta):
+                                    sig = self._create_signal(
+                                        SignalType.STARS_CHANGED,
+                                        payload,
+                                        now,
+                                    )
+                                    signals.append(sig)
+                                    self._record_signal_fingerprint(SignalType.STARS_CHANGED, payload, meta)
+                                    repo_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                                else:
+                                    repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
                             else:
                                 repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
                         else:
+                            # First observation: establish baseline
                             repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
-                    else:
-                        # First observation: establish baseline
-                        repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
-                except (json.JSONDecodeError, ValueError, TypeError):
-                    repo_outcome = ExecutionOutcome.TRANSFORM_ERROR
-            else:
-                if repo_eval and repo_eval.new_status == TargetStatus.COOLDOWN:
-                    repo_outcome = ExecutionOutcome.POLICY_COOLDOWN
-                elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
-                    repo_outcome = ExecutionOutcome.TIMEOUT
-                elif res.error or (res.status_code is not None and res.status_code >= 400):
-                    repo_outcome = ExecutionOutcome.FETCH_FAILED
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        repo_outcome = ExecutionOutcome.TRANSFORM_ERROR
                 else:
-                    repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
-            last_status_code = res.status_code
+                    if repo_eval and repo_eval.new_status == TargetStatus.COOLDOWN:
+                        repo_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                    elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                        repo_outcome = ExecutionOutcome.TIMEOUT
+                    elif res.error or (res.status_code is not None and res.status_code >= 400):
+                        repo_outcome = ExecutionOutcome.FETCH_FAILED
+                    else:
+                        repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                last_status_code = res.status_code
+        finally:
+            _release_claims()
 
         # 4. Determine composite outcome
         if signals:
