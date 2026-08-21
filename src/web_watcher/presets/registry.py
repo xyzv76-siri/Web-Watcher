@@ -164,6 +164,47 @@ def _build_price(url: str, **overrides: Any) -> WatcherRule:
     )
 
 
+def _build_noise_reduction(url: str, **overrides: Any) -> WatcherRule:
+    """Build a rule optimized for noisy pages: precise selector + text_diff + conservative cooldown."""
+    selector = overrides.get("selector") or "body"
+    interval = overrides.get("interval") or "15m"
+    channel = overrides.get("channel") or "console"
+    cooldown = overrides.get("cooldown") or "600s"
+    rule_id = overrides.get("rule_id") or "noise_reduction"
+    name = overrides.get("name") or "Noise Reduction Monitor"
+
+    return WatcherRule(
+        id=rule_id,
+        name=name,
+        target=TargetConfig(
+            url=url,
+            interval=interval,
+            timeout=10.0,
+        ),
+        extractors=[
+            ExtractorConfig(
+                name="content",
+                selector_type="css",
+                selector=selector,
+                transforms=["text", "strip"],
+            ),
+        ],
+        triggers=[
+            TriggerConfig(
+                type="text_diff",
+                field="content",
+                importance="important",
+                title_template="Content changed: {{content}}",
+                body_template="Detected text change on monitored page.\nURL: {url}\nContent: {{content}}",
+            ),
+        ],
+        routing=RoutingConfig(
+            channels=[channel],
+            cooldown=cooldown,
+        ),
+    )
+
+
 # Registry
 
 PRESETS: Dict[str, PresetDefinition] = {
@@ -181,6 +222,11 @@ PRESETS: Dict[str, PresetDefinition] = {
         name="Price",
         description="Monitor a price or numeric value on a web page.",
         build_rule=_build_price,
+    ),
+    "noise_reduction": PresetDefinition(
+        name="Noise Reduction",
+        description="Monitor a noisy page with precise selector and conservative cooldown to reduce false positives.",
+        build_rule=_build_noise_reduction,
     ),
 }
 

@@ -6,11 +6,12 @@ from web_watcher.rule_models import WatcherRule
 
 def test_list_presets_returns_all():
     presets = list_presets()
-    assert len(presets) == 3
+    assert len(presets) == 4
     names = {p.name for p in presets}
     assert "GitHub Release" in names
     assert "Blog Post" in names
     assert "Price" in names
+    assert "Noise Reduction" in names
 
 
 def test_get_preset_known():
@@ -101,6 +102,7 @@ def test_all_presets_generate_parseable_yaml():
         ("github_release", "https://github.com/owner/repo", {}),
         ("blog_post", "https://example.com/blog", {"selector": "h1"}),
         ("price", "https://example.com/product/123", {"selector": ".price"}),
+        ("noise_reduction", "https://example.com/noisy", {"selector": "body"}),
     ]
 
     for preset_name, url, overrides in cases:
@@ -120,3 +122,23 @@ def test_preset_output_is_deterministic():
 
     from web_watcher.cli import _rule_to_yaml
     assert _rule_to_yaml(rule1) == _rule_to_yaml(rule2)
+
+
+def test_noise_reduction_generates_valid_rule():
+    preset = get_preset("noise_reduction")
+    rule = preset.generate("https://example.com/noisy", selector=".main")
+    assert isinstance(rule, WatcherRule)
+    assert rule.id == "noise_reduction"
+    assert rule.target.url == "https://example.com/noisy"
+    assert rule.target.interval == "15m"
+    assert rule.extractors[0].selector == ".main"
+    assert "strip" in rule.extractors[0].transforms
+    assert rule.triggers[0].type == "text_diff"
+    assert rule.triggers[0].field == "content"
+    assert rule.routing.cooldown == "600s"
+
+
+def test_noise_reduction_default_selector_is_body():
+    preset = get_preset("noise_reduction")
+    rule = preset.generate("https://example.com/noisy")
+    assert rule.extractors[0].selector == "body"

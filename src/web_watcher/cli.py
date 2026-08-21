@@ -585,6 +585,8 @@ def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
         elif args.preset == "price":
             example_url = "https://example.com/product/123"
             overrides["selector"] = ".price"
+        elif args.preset == "noise_reduction":
+            overrides["selector"] = "body"
 
         example_rule = preset.generate(example_url, **overrides)
         print("Example rule (illustrative):")
