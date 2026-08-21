@@ -1,0 +1,27 @@
+version: "1.0"
+rules:
+  - id: inspect_scope_test
+    name: Inspect Scope Test Rule
+    target:
+      url: https://example.com/pricing
+      interval: 15m
+      timeout: 10.0
+    extractors:
+      - name: price
+        selector_type: css
+        selector: div.pricing
+        scope_selector: .price
+        transforms:
+          - strip_tags
+          - to_float
+    triggers:
+      - type: field_change
+        field: price
+        importance: important
+    routing:
+      channels:
+        - console
+      cooldown: 300s
+    status: enabled
+    tags:
+      - test

@@ -6,8 +6,10 @@ import os
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+from unittest.mock import MagicMock
 
 import yaml
 
@@ -25,6 +27,11 @@ from .rule_parser import RuleParser
 from .rule_evaluator import RuleEvaluator
 from .rule_models import WatcherRule
 from .presets import get_preset, list_presets
+from .generic_web_target import GenericWebTarget
+from .models import Target, TargetStatus
+from .fetcher import SmartFetcher, FetchResult
+from .fetch_policy import FetchPolicy
+from .fetch import FetchStatus
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +369,17 @@ def build_parser() -> argparse.ArgumentParser:
     test_rule_parser.add_argument("rule_file", help="Path to YAML rule file")
     test_rule_parser.add_argument("--html-file", default=None, help="Local HTML file to evaluate against")
     test_rule_parser.add_argument("--url", default=None, help="Remote URL to fetch and evaluate")
+
+    # 8.1 inspect subcommand (Debug / Inspection Mode v1)
+    inspect_parser = subparsers.add_parser(
+        "inspect",
+        help="Run a single rule through the full pipeline and show detailed debug output",
+    )
+    inspect_parser.add_argument("--rule", required=True, help="Path to YAML rule file")
+    inspect_parser.add_argument("--url", default=None, help="Remote URL to fetch and evaluate")
+    inspect_parser.add_argument("--html-file", default=None, help="Local HTML file to evaluate against")
+    inspect_parser.add_argument("--extractor", dest="inspect_extractor", default=None, help="Only inspect this extractor name")
+    inspect_parser.add_argument("--verbose", action="store_true", help="Show full diff/evidence instead of truncating")
 
     # 9. template subcommand (Preset)
     template_parser = subparsers.add_parser(
@@ -855,6 +873,125 @@ def handle_test_rule(args: argparse.Namespace) -> int:
     return 0
 
 
+def _truncate(text: str, limit: int = 200) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def handle_inspect(args: argparse.Namespace) -> int:
+    try:
+        ruleset = RuleParser.parse_file(args.rule)
+    except Exception as e:
+        print(f"[ERROR] Failed to parse rule file: {e}")
+        return 1
+
+    if not ruleset.rules:
+        print("[ERROR] No rules found in rule file.")
+        return 1
+
+    rule = ruleset.rules[0]
+    print(f"=== Inspect Rule [{rule.id}]: {rule.name} ===\n")
+
+    html_content = ""
+    if args.html_file:
+        html_content = Path(args.html_file).read_text(encoding="utf-8")
+        print(f"HTML Source: local file ({len(html_content)} bytes)")
+    elif args.url:
+        print(f"Fetching URL: {rule.target.url}")
+        req = urllib.request.Request(args.url, headers=rule.target.headers or {"User-Agent": "WebWatcher/1.0"})
+        with urllib.request.urlopen(req, timeout=rule.target.timeout) as resp:
+            html_content = resp.read().decode("utf-8", errors="ignore")
+        print(f"HTTP Status: {resp.status}")
+        print(f"HTML Source: remote ({len(html_content)} bytes)")
+    else:
+        print("[ERROR] Provide either --url or --html-file.")
+        return 1
+
+    target = Target(
+        id=rule.id,
+        url=rule.target.url,
+        status=TargetStatus.NORMAL,
+        interval=rule.target.interval,
+    )
+    adapter = GenericWebTarget(
+        target=target,
+        extractors=rule.extractors,
+        rule_status=rule.status,
+    )
+
+    now = datetime.utcnow()
+    fetch_result = FetchResult(
+        target_key=rule.id,
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=html_content,
+        etag=None,
+        last_modified=None,
+    )
+
+    print(f"\n--- Fetch ---")
+    print(f"status={fetch_result.status.value}")
+    print(f"status_code={fetch_result.status_code}")
+    print(f"etag={fetch_result.etag}")
+    print(f"last_modified={fetch_result.last_modified}")
+    print(f"error={fetch_result.error}")
+    print()
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = fetch_result
+
+    result = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    print(f"--- Observation ---")
+    print(f"status={result.observation.status}")
+    print(f"reason={result.reason}")
+    print(f"outcome={result.outcome}")
+    print(f"signals_emitted={len(result.signals_emitted)}")
+    print()
+
+    extractor_filter = getattr(args, "inspect_extractor", None)
+    verbose = getattr(args, "verbose", False)
+    limit = None if verbose else 200
+
+    print("--- Extractors ---")
+    for name, extracted in result.observation.extracted_results.items():
+        if extractor_filter and name != extractor_filter:
+            continue
+        cfg = next((ext for ext in rule.extractors if ext.name == name), None)
+        print(f"[{name}]")
+        print(f"  selector: {getattr(cfg, 'selector', None)}")
+        print(f"  scope_selector: {getattr(cfg, 'scope_selector', None)}")
+        print(f"  status: {extracted.status.value}")
+        print(f"  raw_value: {_truncate(extracted.raw_value, limit)}")
+        print(f"  normalized_value: {_truncate(result.observation.normalized_values.get(name), limit)}")
+        print(f"  previous_value: {_truncate(result.observation.previous_values.get(name), limit)}")
+
+        diff = result.observation.diffs.get(name)
+        if diff:
+            print(f"  changed: {diff.changed}")
+            print(f"  diff_summary: {diff.summary}")
+            if verbose:
+                print(f"  before: {diff.before}")
+                print(f"  after: {diff.after}")
+            else:
+                print(f"  before: {_truncate(diff.before, limit)}")
+                print(f"  after: {_truncate(diff.after, limit)}")
+
+        evidence = result.observation.evidence.get("extractor_results", {}).get(name, {})
+        if evidence:
+            print(f"  scope_miss: {evidence.get('scope_miss')}")
+            print(f"  scope_matched_count: {evidence.get('scope_matched_count')}")
+            print(f"  scope_merged_count: {evidence.get('scope_merged_count')}")
+        print()
+
+    return 0
+
+
 def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
     if args.template_command == "list":
         print("Available presets:\n")
@@ -1131,6 +1268,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_retention(args, config)
     if args.command == "test-rule":
         return handle_test_rule(args)
+    if args.command == "inspect":
+        return handle_inspect(args)
     if args.command == "template":
         return handle_template(args, config)
     if args.command == "rules":

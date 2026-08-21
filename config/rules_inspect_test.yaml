@@ -1,0 +1,31 @@
+version: "1.0"
+rules:
+  - id: inspect_test
+    name: Inspect Test Rule
+    target:
+      url: https://example.com/pricing
+      interval: 15m
+      timeout: 10.0
+    extractors:
+      - name: price
+        selector_type: css
+        selector: div.pricing .price
+        transforms:
+          - strip_tags
+          - to_float
+      - name: plan
+        selector_type: css
+        selector: div.pricing .plan
+        transforms:
+          - strip_tags
+    triggers:
+      - type: field_change
+        field: price
+        importance: important
+    routing:
+      channels:
+        - console
+      cooldown: 300s
+    status: enabled
+    tags:
+      - test
