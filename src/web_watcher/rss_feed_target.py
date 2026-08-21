@@ -2,6 +2,7 @@ import hashlib
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import logging
 from typing import Any, Dict, List, Optional
 from web_watcher.models import Target, TargetStatus
 from web_watcher.fetch_policy import FetchPolicy
@@ -10,8 +11,11 @@ from web_watcher.fetch import FetchStatus
 from web_watcher.signal_types import SignalType
 from web_watcher.execution_semantics import ExecutionOutcome, transition_for
 from web_watcher.targets import _validate_url
+from web_watcher.generic_web_target import TargetExecutionResult
 from web_watcher.observation import ObservationResult, ObservationStatus
 from web_watcher.dynamic_noise import FalsePositiveGuard, NoiseReductionLevel
+
+logger = logging.getLogger(__name__)
 
 try:
     from web_watcher.models import Signal
@@ -27,31 +31,6 @@ class FeedEntry:
     published_at: Optional[str]
     content: str
     content_hash: str
-
-
-@dataclass
-class TargetExecutionResult:
-    target_id: str
-    allowed: bool
-    status_code: Optional[int]
-    new_status: TargetStatus
-    signals_emitted: List[Any]
-    extracted_results: Dict[str, Any]
-    extracted_values: Dict[str, Any]
-    is_304: bool = False
-    has_extraction_failures: bool = False
-    reason: str = ""
-    updated_etag: Optional[str] = None
-    updated_last_modified: Optional[str] = None
-    updated_content_hash: Optional[str] = None
-    updated_metadata: Optional[Dict[str, Any]] = None
-    updated_url: Optional[str] = None
-    consecutive_failures: int = 0
-    next_allowed_at: Optional[datetime] = None
-    last_fetched_at: Optional[datetime] = None
-    outcome: Any = None
-    transition: Any = None
-    observation: Optional[ObservationResult] = None
 
 
 class RSSFeedTarget:
@@ -442,7 +421,8 @@ class RSSFeedTarget:
                             payload=payload,
                             observed_at=now,
                         )
-                    except Exception:
+                    except (TypeError, ValueError) as exc:
+                        logger.debug("Signal construction failed for %s: %s", entry_id, exc)
                         sig_obj = payload
                 else:
                     sig_obj = payload

@@ -512,8 +512,7 @@ class ScheduledRunner:
                 correlation_plan=correlation_plan,
                 now=now,
             )
-            import logging
-            logging.warning(f"[DEBUG] finalize_execution committed={committed}, signals_count={len(signals)}, correlation_plan={correlation_plan}")
+            logger.debug(f"finalize_execution committed={committed}, signals_count={len(signals)}, correlation_plan={correlation_plan}")
             if not committed:
                 logger.warning(
                     f"Fenced finalize failed for target '{target_id}'; lease may have been lost.",
@@ -696,8 +695,7 @@ class ScheduledRunner:
             "registry_filtered": registry_filtered,
             "reload": reload_stats,
         }
-        import logging
-        logging.warning(f"[DEBUG] claimed count={len(claimed)}, ids={[c.id for c in claimed]}, rules_filtered={rules_filtered}")
+        logger.debug(f"claimed count={len(claimed)}, ids={[c.id for c in claimed]}, rules_filtered={rules_filtered}")
 
         all_signals = []
 

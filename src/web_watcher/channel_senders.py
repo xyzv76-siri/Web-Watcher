@@ -259,6 +259,11 @@ class EmailSender(BaseChannelSender):
         msg.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
         return msg
 
+    def _connect_and_send(self, server, msg):
+        if self.smtp_user and self.smtp_password:
+            server.login(self.smtp_user, self.smtp_password)
+        server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+
     def send(self, notification: Notification) -> DeliveryResult:
         if not self.to_addrs:
             return DeliveryResult(success=False, error_message="Email recipient addresses are not configured")
@@ -267,16 +272,12 @@ class EmailSender(BaseChannelSender):
             msg = self._build_message(notification)
             if self.use_ssl:
                 with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10) as server:
-                    if self.smtp_user and self.smtp_password:
-                        server.login(self.smtp_user, self.smtp_password)
-                    server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+                    self._connect_and_send(server, msg)
             else:
                 with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as server:
                     if self.use_tls:
                         server.starttls()
-                    if self.smtp_user and self.smtp_password:
-                        server.login(self.smtp_user, self.smtp_password)
-                    server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+                    self._connect_and_send(server, msg)
             return DeliveryResult(success=True, status_code=250, response_body="Accepted")
         except smtplib.SMTPException as exc:
             return DeliveryResult(success=False, error_message=f"SMTPError: {str(exc)}")

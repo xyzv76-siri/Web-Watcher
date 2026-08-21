@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--smtp-password",
         type=str,
         default=None,
-        help="SMTP authentication password",
+        help="SMTP authentication password (avoid on command line; prefer WEB_WATCHER_SMTP_PASSWORD env var)",
     )
     notify_parser.add_argument(
         "--smtp-use-tls",
@@ -960,11 +960,15 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
 
     email_sender = None
     if getattr(args, "smtp_host", None):
+        smtp_password = getattr(args, "smtp_password", None)
+        if smtp_password is None:
+            import os
+            smtp_password = os.getenv("WEB_WATCHER_SMTP_PASSWORD")
         email_sender = EmailSender(
             smtp_host=args.smtp_host,
             smtp_port=getattr(args, "smtp_port", 25),
             smtp_user=getattr(args, "smtp_user", None),
-            smtp_password=getattr(args, "smtp_password", None),
+            smtp_password=smtp_password,
             use_tls=getattr(args, "smtp_use_tls", False),
             use_ssl=getattr(args, "smtp_use_ssl", False),
             from_addr=getattr(args, "email_from", None),
