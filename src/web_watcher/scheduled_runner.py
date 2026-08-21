@@ -70,6 +70,13 @@ class ScheduledRunner:
         self.metrics = metrics
         self.include_tags = include_tags or []
         self.exclude_tags = exclude_tags or []
+        self.registry = None
+        if self.repo is not None:
+            try:
+                from .rule_registry import RuleRegistry
+                self.registry = RuleRegistry(self.repo)
+            except Exception:
+                self.registry = None
 
     def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
         if not self.metrics:
@@ -484,6 +491,22 @@ class ScheduledRunner:
                 filtered_rule_ids = {t.id for t in filtered_targets}
                 self._rule_cache = {k: v for k, v in self._rule_cache.items() if k in filtered_rule_ids}
 
+        # 1.3 Rule registry filtering (after tag filtering)
+        registry_filtered = 0
+        if self.registry is not None and self._rule_cache:
+            enabled_rule_ids = set(self.registry.get_enabled_rules())
+            if enabled_rule_ids:
+                disabled_ids = [r_id for r_id in self._rule_cache if r_id not in enabled_rule_ids]
+                registry_filtered = len(disabled_ids)
+                if disabled_ids:
+                    self._rule_cache = {k: v for k, v in self._rule_cache.items() if k in enabled_rule_ids}
+            # Sort by priority (descending)
+            self._rule_cache = dict(sorted(
+                self._rule_cache.items(),
+                key=lambda item: self.registry.get(item[0]) and self.registry.get(item[0]).get("priority", 0) or 0,
+                reverse=True,
+            ))
+
         # 2. Claim：生产路径必须通过 lease/fencing
         claimed: List[Any] = []
         if self.repo and hasattr(self.repo, "claim_targets"):
@@ -504,6 +527,7 @@ class ScheduledRunner:
             "skipped_count": 0,
             "errors": [],
             "rules_filtered": rules_filtered,
+            "registry_filtered": registry_filtered,
             "reload": reload_stats,
         }
         import logging

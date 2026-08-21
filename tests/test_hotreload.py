@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from web_watcher.scheduled_runner import ScheduledRunner
 from web_watcher.models import Target, TargetStatus
 from web_watcher.repository import Repository
+from web_watcher.repository import Repository
 
 
 @pytest.fixture
@@ -223,16 +224,18 @@ rules:
 
 
 def test_run_once_triggers_hotreload(tmp_rules):
-    repo = MagicMock()
-    repo.list_targets.return_value = []
-    repo.claim_targets.return_value = []
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
+        db_path = tmp_db.name
 
-    runner = ScheduledRunner(rules_path=str(tmp_rules), repo=repo)
-    runner.sync_rules()
+    try:
+        repo = Repository(db_path)
+        runner = ScheduledRunner(rules_path=str(tmp_rules), repo=repo)
+        runner.sync_rules()
 
-    # Modify file
-    tmp_rules.write_text(
-        """
+        # Modify file
+        tmp_rules.write_text(
+            """
 version: "1.0"
 rules:
   - id: rule_b
@@ -258,10 +261,12 @@ rules:
     status: enabled
     tags: []
 """
-    )
+        )
 
-    summary = runner.run_once()
-    assert summary["reload"] is not None
-    assert summary["reload"]["reloaded"] == 1
-    assert "rule_a" not in runner._rule_cache
-    assert "rule_b" in runner._rule_cache
+        summary = runner.run_once()
+        assert summary["reload"] is not None
+        assert summary["reload"]["reloaded"] == 1
+        assert "rule_a" not in runner._rule_cache
+        assert "rule_b" in runner._rule_cache
+    finally:
+        Path(db_path).unlink(missing_ok=True)

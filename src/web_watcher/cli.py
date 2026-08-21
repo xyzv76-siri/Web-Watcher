@@ -480,6 +480,91 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 12. registry subcommand (Rule Registry v1)
+    registry_parser = subparsers.add_parser(
+        "registry",
+        help="Inspect and manage rule runtime registry",
+    )
+    registry_subparsers = registry_parser.add_subparsers(dest="registry_command", help="Registry commands")
+    registry_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # registry list
+    registry_list_parser = registry_subparsers.add_parser(
+        "list",
+        help="List registered rules",
+    )
+    registry_list_parser.add_argument(
+        "--group",
+        dest="registry_group",
+        default=None,
+        help="Filter by group name",
+    )
+    registry_list_parser.add_argument(
+        "--enabled",
+        dest="registry_enabled",
+        action="store_true",
+        default=None,
+        help="Only show enabled rules",
+    )
+    registry_list_parser.add_argument(
+        "--disabled",
+        dest="registry_disabled",
+        action="store_true",
+        default=None,
+        help="Only show disabled rules",
+    )
+
+    # registry show
+    registry_show_parser = registry_subparsers.add_parser(
+        "show",
+        help="Show details of a registered rule",
+    )
+    registry_show_parser.add_argument("rule_id", help="Rule ID to show")
+
+    # registry enable
+    registry_enable_parser = registry_subparsers.add_parser(
+        "enable",
+        help="Enable a registered rule",
+    )
+    registry_enable_parser.add_argument("rule_id", help="Rule ID to enable")
+
+    # registry disable
+    registry_disable_parser = registry_subparsers.add_parser(
+        "disable",
+        help="Disable a registered rule",
+    )
+    registry_disable_parser.add_argument("rule_id", help="Rule ID to disable")
+
+    # registry priority
+    registry_priority_parser = registry_subparsers.add_parser(
+        "priority",
+        help="Set execution priority for a registered rule",
+    )
+    registry_priority_parser.add_argument("rule_id", help="Rule ID")
+    registry_priority_parser.add_argument("priority", type=int, help="Priority value (higher runs first)")
+
+    # registry group
+    registry_group_parser = registry_subparsers.add_parser(
+        "group",
+        help="Assign a registered rule to a group",
+    )
+    registry_group_parser.add_argument("rule_id", help="Rule ID")
+    registry_group_parser.add_argument("group_name", help="Group name")
+
+    # registry remove
+    registry_remove_parser = registry_subparsers.add_parser(
+        "remove",
+        help="Remove a rule from the registry",
+    )
+    registry_remove_parser.add_argument("rule_id", help="Rule ID to remove")
+
     # 11. rules subcommand (Observability v1)
     rules_parser = subparsers.add_parser(
         "rules",
@@ -1255,6 +1340,107 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
     return 1
 
 
+def handle_registry(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    repo = Repository(db_path)
+    from .rule_registry import RuleRegistry
+    registry = RuleRegistry(repo)
+
+    command = getattr(args, "registry_command", None)
+
+    if command == "list":
+        group = getattr(args, "registry_group", None)
+        enabled_only = getattr(args, "registry_enabled", False)
+        disabled_only = getattr(args, "registry_disabled", False)
+
+        enabled_filter = None
+        if enabled_only and not disabled_only:
+            enabled_filter = True
+        elif disabled_only and not enabled_only:
+            enabled_filter = False
+
+        rules = registry.list_rules(group_name=group, enabled=enabled_filter)
+        if not rules:
+            print("No registered rules found.")
+            return 0
+
+        print(f"{'Rule ID':<20} {'Enabled':<8} {'Priority':<10} {'Group':<20}")
+        print("-" * 70)
+        for r in rules:
+            enabled_str = "yes" if r["enabled"] else "no"
+            group_str = r["group_name"] or "-"
+            print(f"{r['rule_id']:<20} {enabled_str:<8} {r['priority']:<10} {group_str:<20}")
+        return 0
+
+    if command == "show":
+        rule_id = args.rule_id
+        r = registry.get(rule_id)
+        if not r:
+            print(f"[ERROR] Rule not found in registry: {rule_id}")
+            return 1
+        print(f"Rule ID:    {r['rule_id']}")
+        print(f"Enabled:    {'yes' if r['enabled'] else 'no'}")
+        print(f"Priority:   {r['priority']}")
+        print(f"Group:      {r['group_name'] or '-'}")
+        if r["metadata"]:
+            print("Metadata:")
+            for k, v in r["metadata"].items():
+                print(f"  {k}: {v}")
+        print(f"Created At: {r['created_at']}")
+        print(f"Updated At: {r['updated_at']}")
+        return 0
+
+    if command == "enable":
+        rule_id = args.rule_id
+        r = registry.enable(rule_id)
+        if not r:
+            print(f"[ERROR] Failed to enable rule: {rule_id}")
+            return 1
+        print(f"[OK] Rule '{rule_id}' enabled.")
+        return 0
+
+    if command == "disable":
+        rule_id = args.rule_id
+        r = registry.disable(rule_id)
+        if not r:
+            print(f"[ERROR] Failed to disable rule: {rule_id}")
+            return 1
+        print(f"[OK] Rule '{rule_id}' disabled.")
+        return 0
+
+    if command == "priority":
+        rule_id = args.rule_id
+        priority = args.priority
+        r = registry.set_priority(rule_id, priority)
+        if not r:
+            print(f"[ERROR] Failed to set priority for rule: {rule_id}")
+            return 1
+        print(f"[OK] Rule '{rule_id}' priority set to {priority}.")
+        return 0
+
+    if command == "group":
+        rule_id = args.rule_id
+        group_name = args.group_name
+        r = registry.set_group(rule_id, group_name)
+        if not r:
+            print(f"[ERROR] Failed to set group for rule: {rule_id}")
+            return 1
+        print(f"[OK] Rule '{rule_id}' assigned to group '{group_name}'.")
+        return 0
+
+    if command == "remove":
+        rule_id = args.rule_id
+        removed = registry.remove(rule_id)
+        if not removed:
+            print(f"[ERROR] Rule not found in registry: {rule_id}")
+            return 1
+        print(f"[OK] Rule '{rule_id}' removed from registry.")
+        return 0
+
+    print("[ERROR] Unknown registry command. Use: list, show, enable, disable, priority, group, remove")
+    return 1
+
+
 def handle_targets(args: argparse.Namespace, config: AppConfig) -> int:
     db_path = getattr(args, "db_path", config.db_path)
     repo = Repository(db_path)
@@ -1366,6 +1552,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_targets(args, config)
     if args.command == "reload":
         return handle_reload(args, config)
+    if args.command == "registry":
+        return handle_registry(args, config)
 
     parser.print_help()
     return 0
