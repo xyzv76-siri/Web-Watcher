@@ -59,6 +59,7 @@ class RuleParser:
                     selector_type=ext.get("selector_type", "css"),
                     selector=ext["selector"],
                     transforms=list(ext.get("transforms", [])),
+                    scope_selector=ext.get("scope_selector"),
                 ))
 
             triggers = []
