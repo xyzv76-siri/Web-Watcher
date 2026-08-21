@@ -88,6 +88,7 @@ class RuleParser:
                 extractors=extractors,
                 triggers=triggers,
                 routing=routing,
+                status=str(raw_rule.get("status", "enabled")),
             ))
 
         return RuleSet(version=version, rules=rules)

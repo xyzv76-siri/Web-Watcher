@@ -43,6 +43,7 @@ class WatcherRule:
     extractors: List[ExtractorConfig] = field(default_factory=list)
     triggers: List[TriggerConfig] = field(default_factory=list)
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    status: str = "enabled"
 
 
 @dataclass

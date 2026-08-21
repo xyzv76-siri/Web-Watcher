@@ -58,6 +58,7 @@ class GitHubTarget:
         token: Optional[str] = None,
         star_delta_threshold: int = 1,
         timeout: float = 10.0,
+        rule_status: str = "enabled",
     ):
         self.target = target
         self.owner, self.repo_name = parse_github_repo(target.url)
@@ -65,6 +66,7 @@ class GitHubTarget:
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.star_delta_threshold = max(1, star_delta_threshold)
         self.timeout = timeout
+        self.rule_status = rule_status
 
     def _build_headers(self, etag: Optional[str] = None) -> Dict[str, str]:
         headers = {
@@ -133,6 +135,23 @@ class GitHubTarget:
         now = now or datetime.now(timezone.utc)
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
+
+        if self.rule_status == "disabled":
+            return GitHubTargetExecutionResult(
+                target_id=self.target.id,
+                allowed=False,
+                status_code=None,
+                new_status=self.target.status,
+                signals_emitted=[],
+                reason="Rule disabled",
+                outcome=ExecutionOutcome.POLICY_BLOCKED,
+                transition=transition_for(
+                    ExecutionOutcome.POLICY_BLOCKED,
+                    target=self.target,
+                    now=now,
+                    reason="Rule disabled",
+                ),
+            )
 
         # 1. 策略前置检查
         decision = policy.prepare_request(self.target, now=now)

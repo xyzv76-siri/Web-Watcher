@@ -60,6 +60,7 @@ class GenericWebTarget:
         timeout: float = 10.0,
         false_positive_guard: Optional[FalsePositiveGuard] = None,
         noise_reduction_level: str = "standard",
+        rule_status: str = "enabled",
     ):
         _validate_url(target.url)
         for ext in (extractors or []):
@@ -71,6 +72,7 @@ class GenericWebTarget:
         self.false_positive_guard = false_positive_guard or FalsePositiveGuard(
             level=NoiseReductionLevel(noise_reduction_level),
         )
+        self.rule_status = rule_status
 
     def execute(
         self,
@@ -82,6 +84,25 @@ class GenericWebTarget:
         now = now or datetime.now(timezone.utc)
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
+
+        if self.rule_status == "disabled":
+            return TargetExecutionResult(
+                target_id=self.target.id,
+                allowed=False,
+                status_code=None,
+                new_status=self.target.status,
+                signals_emitted=[],
+                extracted_results={},
+                extracted_values={},
+                reason="Rule disabled",
+                outcome=ExecutionOutcome.POLICY_BLOCKED,
+                transition=transition_for(
+                    ExecutionOutcome.POLICY_BLOCKED,
+                    target=self.target,
+                    now=now,
+                    reason="Rule disabled",
+                ),
+            )
 
         # 1. Policy pre-check
         decision = policy.prepare_request(self.target, now=now)

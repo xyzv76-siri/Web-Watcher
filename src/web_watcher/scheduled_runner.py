@@ -126,6 +126,7 @@ class ScheduledRunner:
             or "api.github.com" in url_lower
             or (not url_lower.startswith("http") and "/" in url_lower and not url_lower.startswith("."))
         )
+        rule_status = getattr(rule, "status", "enabled") if rule else "enabled"
 
         if is_github:
             watch_types = target.metadata.get("watch_types", ["releases", "stars", "tags"])
@@ -135,6 +136,7 @@ class ScheduledRunner:
                 watch_types=watch_types,
                 token=token,
                 timeout=rule.target.timeout if rule else 10.0,
+                rule_status=rule_status,
             )
         else:
             extractors = rule.extractors if rule else []
@@ -147,6 +149,7 @@ class ScheduledRunner:
                 custom_headers=custom_headers,
                 timeout=timeout,
                 noise_reduction_level=noise_reduction_level,
+                rule_status=rule_status,
             )
 
     @staticmethod

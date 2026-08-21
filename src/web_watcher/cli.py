@@ -2,11 +2,14 @@
 
 import argparse
 import logging
+import os
 import sys
 import time
 import urllib.request
 from pathlib import Path
 from typing import List, Optional
+
+import yaml
 
 from .channel_senders import WebhookSender
 from .event_correlator import EventCorrelator
@@ -324,6 +327,62 @@ def build_parser() -> argparse.ArgumentParser:
     template_apply_parser.add_argument("--name", default=None, help="Rule name override")
     template_apply_parser.add_argument("--output", "-o", default=None, help="Output file path (default: stdout)")
 
+    # 10. rules subcommand (Observability v1)
+    rules_parser = subparsers.add_parser(
+        "rules",
+        help="Inspect and manage YAML rules",
+    )
+    rules_subparsers = rules_parser.add_subparsers(dest="rules_command", help="Rules commands")
+    rules_parser.add_argument(
+        "--rules",
+        dest="rules_path",
+        type=str,
+        default=None,
+        help="Path to YAML rules file (default: WEB_WATCHER_RULES or config/rules.yaml)",
+    )
+
+    # rules list
+    rules_list_parser = rules_subparsers.add_parser(
+        "list",
+        help="List all rules with id, name, status, and target URL",
+    )
+
+    # rules show
+    rules_show_parser = rules_subparsers.add_parser(
+        "show",
+        help="Show details of a specific rule",
+    )
+    rules_show_parser.add_argument("rule_id", help="Rule ID to show")
+
+    # rules enable
+    rules_enable_parser = rules_subparsers.add_parser(
+        "enable",
+        help="Enable a rule",
+    )
+    rules_enable_parser.add_argument("rule_id", help="Rule ID to enable")
+
+    # rules disable
+    rules_disable_parser = rules_subparsers.add_parser(
+        "disable",
+        help="Disable a rule",
+    )
+    rules_disable_parser.add_argument("rule_id", help="Rule ID to disable")
+
+    # 11. notify history subcommand (Observability v1)
+    notify_parser.add_argument(
+        "--history",
+        dest="notify_history",
+        action="store_true",
+        help="Show recent notification delivery history",
+    )
+    notify_parser.add_argument(
+        "--history-limit",
+        dest="notify_history_limit",
+        type=int,
+        default=20,
+        help="Maximum number of history records to show (default: 20)",
+    )
+
     return parser
 
 
@@ -374,6 +433,27 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
     interval = getattr(args, "interval", config.default_poll_interval)
     webhook_url = getattr(args, "webhook_url", None)
     run_once = getattr(args, "once", False)
+    show_history = getattr(args, "notify_history", False)
+    history_limit = getattr(args, "notify_history_limit", 20)
+
+    if show_history:
+        repo = Repository(db_path)
+        cursor = repo.connection.execute(
+            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications ORDER BY created_at DESC LIMIT ?",
+            (history_limit,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            print("No notification history found.")
+            return 0
+
+        print(f"{'ID':<6} {'Event':<8} {'Channel':<12} {'Status':<14} {'Created At':<26} {'Sent At'}")
+        print("-" * 90)
+        for row in rows:
+            nid, event_id, channel, status, created_at, sent_at, payload = row
+            sent_str = sent_at if sent_at else "-"
+            print(f"{nid:<6} {event_id:<8} {channel:<12} {status:<14} {created_at:<26} {sent_str}")
+        return 0
 
     repo = Repository(db_path)
     dispatcher = _build_dispatcher(repo, webhook_url, config)
@@ -634,6 +714,95 @@ def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
     return 1
 
 
+def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
+    rules_path = getattr(args, "rules_path", None) or os.getenv("WEB_WATCHER_RULES") or "config/rules.yaml"
+    path = Path(rules_path)
+
+    if not path.exists():
+        print(f"[ERROR] Rules file not found: {path}")
+        return 1
+
+    try:
+        ruleset = RuleParser.parse_file(path)
+    except Exception as e:
+        print(f"[ERROR] Failed to parse rules file: {e}")
+        return 1
+
+    rules = ruleset.rules
+    command = getattr(args, "rules_command", None)
+
+    if command == "list":
+        if not rules:
+            print("No rules found.")
+            return 0
+        print(f"{'ID':<20} {'Name':<30} {'Status':<10} {'Target URL'}")
+        print("-" * 100)
+        for rule in rules:
+            print(f"{rule.id:<20} {rule.name:<30} {rule.status:<10} {rule.target.url}")
+        return 0
+
+    if command == "show":
+        rule_id = args.rule_id
+        rule = next((r for r in rules if r.id == rule_id), None)
+        if not rule:
+            print(f"[ERROR] Rule not found: {rule_id}")
+            return 1
+        print(f"ID:          {rule.id}")
+        print(f"Name:        {rule.name}")
+        print(f"Status:      {rule.status}")
+        print(f"Target URL:  {rule.target.url}")
+        print(f"Interval:    {rule.target.interval}")
+        print(f"Timeout:     {rule.target.timeout}s")
+        if rule.target.headers:
+            print(f"Headers:     {rule.target.headers}")
+        if rule.extractors:
+            print("\nExtractors:")
+            for ext in rule.extractors:
+                print(f"  - {ext.name} ({ext.selector_type}): {ext.selector}")
+                if ext.transforms:
+                    print(f"    transforms: {ext.transforms}")
+                if ext.scope_selector:
+                    print(f"    scope_selector: {ext.scope_selector}")
+        if rule.triggers:
+            print("\nTriggers:")
+            for trg in rule.triggers:
+                print(f"  - type={trg.type}, field={trg.field}, importance={trg.importance}")
+                if trg.condition:
+                    print(f"    condition: {trg.condition}")
+        if rule.routing.channels:
+            print(f"\nRouting:     channels={rule.routing.channels}, cooldown={rule.routing.cooldown}")
+        return 0
+
+    if command in ("enable", "disable"):
+        rule_id = args.rule_id
+        new_status = "enabled" if command == "enable" else "disabled"
+        rule = next((r for r in rules if r.id == rule_id), None)
+        if not rule:
+            print(f"[ERROR] Rule not found: {rule_id}")
+            return 1
+        if rule.status == new_status:
+            print(f"Rule '{rule_id}' is already {new_status}.")
+            return 0
+
+        # Update YAML file
+        try:
+            content = path.read_text(encoding="utf-8")
+            data = yaml.safe_load(content)
+            for raw_rule in data.get("rules", []):
+                if raw_rule.get("id") == rule_id:
+                    raw_rule["status"] = new_status
+                    break
+            path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False), encoding="utf-8")
+            print(f"[OK] Rule '{rule_id}' status set to '{new_status}'.")
+            return 0
+        except Exception as e:
+            print(f"[ERROR] Failed to update rules file: {e}")
+            return 1
+
+    print("[ERROR] Unknown rules command. Use: list, show, enable, disable")
+    return 1
+
+
 def _yaml_value(value: str) -> str:
     needs_quote = any(c in value for c in [":", "#", "[", "]", "{", "}", ",", "&", "*", "!"]) or value.lower() in ("true", "false", "yes", "no", "on", "off", "null", "~") or value == "" or (value[0:1].isdigit() and value.strip() != value)
     if not needs_quote and "'" not in value and '"' not in value:
@@ -682,6 +851,7 @@ def _rule_to_yaml(rule: WatcherRule) -> str:
     lines.append("    routing:")
     lines.append(f"      channels: {_yaml_list(rule.routing.channels)}")
     lines.append(f"      cooldown: {_yaml_value(rule.routing.cooldown)}")
+    lines.append(f"    status: {_yaml_value(rule.status)}")
     return "\n".join(lines) + "\n"
 
 
@@ -712,6 +882,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_test_rule(args)
     if args.command == "template":
         return handle_template(args, config)
+    if args.command == "rules":
+        return handle_rules(args, config)
 
     parser.print_help()
     return 0
