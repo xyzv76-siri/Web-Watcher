@@ -399,7 +399,35 @@ def build_parser() -> argparse.ArgumentParser:
     template_apply_parser.add_argument("--name", default=None, help="Rule name override")
     template_apply_parser.add_argument("--output", "-o", default=None, help="Output file path (default: stdout)")
 
-    # 10. rules subcommand (Observability v1)
+    # 10. targets subcommand (Target Grouping / Tags)
+    targets_parser = subparsers.add_parser(
+        "targets",
+        help="Inspect and manage targets",
+    )
+    targets_subparsers = targets_parser.add_subparsers(dest="targets_command", help="Targets commands")
+    targets_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # targets list
+    targets_list_parser = targets_subparsers.add_parser(
+        "list",
+        help="List targets with optional tag filter",
+    )
+    targets_list_parser.add_argument(
+        "--tag",
+        dest="target_tags",
+        action="append",
+        default=None,
+        help="Filter by tag (repeatable; OR semantics)",
+    )
+
+    # 11. rules subcommand (Observability v1)
     rules_parser = subparsers.add_parser(
         "rules",
         help="Inspect and manage YAML rules",
@@ -916,10 +944,11 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
         if not rules:
             print("No rules found.")
             return 0
-        print(f"{'ID':<20} {'Name':<30} {'Status':<10} {'Target URL'}")
-        print("-" * 100)
+        print(f"{'ID':<20} {'Name':<30} {'Status':<10} {'Tags':<20} {'Target URL'}")
+        print("-" * 110)
         for rule in rules:
-            print(f"{rule.id:<20} {rule.name:<30} {rule.status:<10} {rule.target.url}")
+            tags_str = ", ".join(rule.tags or [])
+            print(f"{rule.id:<20} {rule.name:<30} {rule.status:<10} {tags_str:<20} {rule.target.url}")
         return 0
 
     if command == "show":
@@ -931,6 +960,8 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
         print(f"ID:          {rule.id}")
         print(f"Name:        {rule.name}")
         print(f"Status:      {rule.status}")
+        tags = ", ".join(rule.tags or [])
+        print(f"Tags:        {tags if tags else '-'}")
         print(f"Target URL:  {rule.target.url}")
         print(f"Interval:    {rule.target.interval}")
         print(f"Timeout:     {rule.target.timeout}s")
@@ -984,6 +1015,28 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
     return 1
 
 
+def handle_targets(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    repo = Repository(db_path)
+    command = getattr(args, "targets_command", None)
+    target_tags = getattr(args, "target_tags", None)
+
+    if command == "list":
+        targets = repo.list_targets(tags=target_tags, require_all=False)
+        if not targets:
+            print("No targets found.")
+            return 0
+        print(f"{'ID':<20} {'URL':<50} {'Status':<12} {'Tags'}")
+        print("-" * 110)
+        for t in targets:
+            tags_str = ", ".join(t.tags or [])
+            print(f"{t.id:<20} {t.url:<50} {t.status.value:<12} {tags_str}")
+        return 0
+
+    print("[ERROR] Unknown targets command. Use: list")
+    return 1
+
+
 def _yaml_value(value: str) -> str:
     needs_quote = any(c in value for c in [":", "#", "[", "]", "{", "}", ",", "&", "*", "!"]) or value.lower() in ("true", "false", "yes", "no", "on", "off", "null", "~") or value == "" or (value[0:1].isdigit() and value.strip() != value)
     if not needs_quote and "'" not in value and '"' not in value:
@@ -1033,6 +1086,8 @@ def _rule_to_yaml(rule: WatcherRule) -> str:
     lines.append(f"      channels: {_yaml_list(rule.routing.channels)}")
     lines.append(f"      cooldown: {_yaml_value(rule.routing.cooldown)}")
     lines.append(f"    status: {_yaml_value(rule.status)}")
+    if rule.tags:
+        lines.append(f"    tags: {_yaml_list(rule.tags)}")
     return "\n".join(lines) + "\n"
 
 
@@ -1065,6 +1120,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_template(args, config)
     if args.command == "rules":
         return handle_rules(args, config)
+    if args.command == "targets":
+        return handle_targets(args, config)
 
     parser.print_help()
     return 0

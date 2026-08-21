@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .event_status import EventStatus
 from .event_types import EventType
@@ -104,7 +104,10 @@ class Target:
     claim_token: Optional[str] = None
     execution_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    tags: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.metadata is None:
             object.__setattr__(self, "metadata", {})
+        if self.tags is None:
+            object.__setattr__(self, "tags", [])

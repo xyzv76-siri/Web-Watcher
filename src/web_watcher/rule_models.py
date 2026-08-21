@@ -44,6 +44,7 @@ class WatcherRule:
     triggers: List[TriggerConfig] = field(default_factory=list)
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     status: str = "enabled"
+    tags: List[str] = field(default_factory=list)
 
 
 @dataclass

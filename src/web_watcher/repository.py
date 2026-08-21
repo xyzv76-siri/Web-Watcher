@@ -1190,17 +1190,19 @@ class Repository:
                 claim_token TEXT,
                 execution_id TEXT,
                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                tags TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
-        # Incrementally add lease columns for existing databases
+        # Incrementally add columns for existing databases
         cols = [c[1] for c in self.connection.execute("PRAGMA table_info(targets)").fetchall()]
         for col_name, col_type in [
             ("lease_owner", "TEXT"),
             ("lease_until", "TEXT"),
             ("claim_token", "TEXT"),
             ("execution_id", "TEXT"),
+            ("tags", "TEXT"),
         ]:
             if col_name not in cols:
                 self.connection.execute(f"ALTER TABLE targets ADD COLUMN {col_name} {col_type}")
@@ -1393,14 +1395,15 @@ class Repository:
         lease_until_iso = _serialize_datetime(getattr(target, "lease_until", None))
         claim_token = getattr(target, "claim_token", None)
         meta_json = json.dumps(target.metadata or {})
+        tags_json = json.dumps(list(target.tags or []))
 
         self.connection.execute("""
             INSERT INTO targets (
                 id, url, interval, status, etag, last_modified, content_hash,
                 consecutive_failures, last_fetched_at, next_allowed_at,
                 lease_owner, lease_until, claim_token,
-                metadata_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                metadata_json, tags, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 url = excluded.url,
                 interval = excluded.interval,
@@ -1415,13 +1418,14 @@ class Repository:
                 lease_until = excluded.lease_until,
                 claim_token = excluded.claim_token,
                 metadata_json = excluded.metadata_json,
+                tags = excluded.tags,
                 updated_at = excluded.updated_at
         """, (
             target.id, target.url, target.interval, status_val, target.etag,
             target.last_modified, target.content_hash, target.consecutive_failures,
             last_fetched_iso, next_allowed_iso,
             lease_owner, lease_until_iso, claim_token,
-            meta_json, now_iso, now_iso
+            meta_json, tags_json, now_iso, now_iso
         ))
         self.connection.commit()
 
@@ -1447,12 +1451,32 @@ class Repository:
             claim_token=row["claim_token"],
             execution_id=row["execution_id"],
             metadata=json.loads(row["metadata_json"] or "{}"),
+            tags=json.loads(row["tags"] or "[]"),
         )
 
-    def list_targets(self) -> List[Any]:
+    def list_targets(
+        self,
+        tags: Optional[List[str]] = None,
+        require_all: bool = False,
+    ) -> List[Any]:
         self._init_target_table()
         from web_watcher.models import Target, TargetStatus
-        rows = self.connection.execute("SELECT * FROM targets ORDER BY id ASC").fetchall()
+
+        if tags:
+            rows = self.connection.execute("SELECT * FROM targets ORDER BY id ASC").fetchall()
+            matched = []
+            for r in rows:
+                target_tags = json.loads(r["tags"] or "[]")
+                if require_all:
+                    if all(t in target_tags for t in tags):
+                        matched.append(r)
+                else:
+                    if any(t in target_tags for t in tags):
+                        matched.append(r)
+            rows = matched
+        else:
+            rows = self.connection.execute("SELECT * FROM targets ORDER BY id ASC").fetchall()
+
         return [
             Target(
                 id=r["id"],
@@ -1468,7 +1492,9 @@ class Repository:
                 lease_owner=r["lease_owner"],
                 lease_until=_parse_iso_datetime(r["lease_until"]),
                 claim_token=r["claim_token"],
+                execution_id=r["execution_id"],
                 metadata=json.loads(r["metadata_json"] or "{}"),
+                tags=json.loads(r["tags"] or "[]"),
             )
             for r in rows
         ]

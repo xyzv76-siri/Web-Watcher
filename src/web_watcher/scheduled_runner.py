@@ -51,6 +51,8 @@ class ScheduledRunner:
         policy: Optional[FetchPolicy] = None,
         worker_id: Optional[str] = None,
         metrics: Optional[Any] = None,
+        include_tags: Optional[List[str]] = None,
+        exclude_tags: Optional[List[str]] = None,
     ):
         self.config = config or get_config()
         self.repo = repo
@@ -64,6 +66,8 @@ class ScheduledRunner:
         self._rule_cache: Dict[str, WatcherRule] = {}
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.metrics = metrics
+        self.include_tags = include_tags or []
+        self.exclude_tags = exclude_tags or []
 
     def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
         if not self.metrics:
@@ -98,6 +102,7 @@ class ScheduledRunner:
                     url=rule.target.url,
                     interval=rule.target.interval,
                     status=TargetStatus.NORMAL,
+                    tags=list(rule.tags or []),
                     metadata={
                         "rule_name": rule.name,
                         "headers": rule.target.headers,
@@ -110,6 +115,7 @@ class ScheduledRunner:
             else:
                 existing.url = rule.target.url
                 existing.interval = rule.target.interval
+                existing.tags = list(rule.tags or [])
                 existing.metadata["rule_name"] = rule.name
                 existing.metadata["headers"] = rule.target.headers
                 existing.metadata["routing_channels"] = rule.routing.channels
@@ -307,6 +313,20 @@ class ScheduledRunner:
             except Exception:
                 pass
 
+        # 1.2 Filter by tags if configured
+        candidate_targets: List[Any] = []
+        if self.repo and (self.include_tags or self.exclude_tags):
+            all_targets = self.repo.list_targets()
+            for t in all_targets:
+                target_tags = list(getattr(t, "tags", None) or [])
+                if self.include_tags and not any(tag in target_tags for tag in self.include_tags):
+                    continue
+                if self.exclude_tags and any(tag in target_tags for tag in self.exclude_tags):
+                    continue
+                candidate_targets.append(t)
+        else:
+            candidate_targets = self.repo.list_targets() if self.repo else []
+
         # 2. Claim：生产路径必须通过 lease/fencing
         claimed: List[Any] = []
         if self.repo and hasattr(self.repo, "claim_targets"):
@@ -319,6 +339,18 @@ class ScheduledRunner:
         elif self._rule_cache:
             for r_id, r in self._rule_cache.items():
                 claimed.append(Target(id=r.id, url=r.target.url, interval=r.target.interval))
+
+        # 3. Apply tag filter to claimed targets
+        if self.include_tags or self.exclude_tags:
+            filtered = []
+            for t in claimed:
+                target_tags = list(getattr(t, "tags", None) or [])
+                if self.include_tags and not any(tag in target_tags for tag in self.include_tags):
+                    continue
+                if self.exclude_tags and any(tag in target_tags for tag in self.exclude_tags):
+                    continue
+                filtered.append(t)
+            claimed = filtered
 
         summary = {
             "targets_evaluated": len(claimed),

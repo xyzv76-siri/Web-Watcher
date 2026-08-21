@@ -89,6 +89,7 @@ class RuleParser:
                 triggers=triggers,
                 routing=routing,
                 status=str(raw_rule.get("status", "enabled")),
+                tags=list(raw_rule.get("tags", []) or []),
             ))
 
         return RuleSet(version=version, rules=rules)
