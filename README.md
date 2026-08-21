@@ -32,6 +32,7 @@ Target
 * **恢复能力** — 防崩溃状态持久化，自动 schema 初始化与过期声明清理。
 * **多 Worker 安全** — 通过 SQLite 锁串行化目标声明；重复声明会被拒绝。
 * **Docker 部署** — 非 root 用户镜像，挂载 `/data` 和 `/logs` 卷。
+* **监控模板（Preset）** — 内置 `github_release`、`blog_post`、`price` 等预设，可直接生成符合现有规则 schema 的 `rules.yaml`。
 
 ## 架构
 
@@ -129,6 +130,17 @@ python -m web_watcher.cli test-rule path/to/rules.yaml
 
 # 系统自检
 python -m web_watcher.cli doctor --verbose
+
+# 列出可用监控模板
+python -m web_watcher.cli template list
+
+# 查看模板示例
+python -m web_watcher.cli template show github_release
+
+# 从模板生成 rules.yaml
+python -m web_watcher.cli template apply github_release --url https://github.com/owner/repo
+python -m web_watcher.cli template apply blog_post --url https://example.com/blog --selector h1
+python -m web_watcher.cli template apply price --url https://example.com/product --selector ".price"
 ```
 
 ### 监控目标
@@ -215,3 +227,10 @@ docker compose exec web-watcher python -m web_watcher.cli doctor
 ## 许可证
 
 MIT License. See [LICENSE](LICENSE) for details.
+
+## 更新说明
+
+本次 README 同步更新了 monitoring preset 功能的说明：
+
+- 在「功能特性」中新增 Preset 能力说明。
+- 在「CLI 使用方式」中补充 `template` 子命令示例：`list`、`show`、`apply`。
