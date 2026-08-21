@@ -301,6 +301,11 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **Digest v1** — 新增 `digest` CLI 子命令，支持 `daily` / `weekly` 预设及自定义 `--since` / `--until` 时间窗口；按 target 汇总事件并生成 Markdown 报告；支持 `--channel console` 直接输出或通过 `webhook` / `email` 渠道派发；`--min-importance` 可过滤只汇总重要以上事件。
 - **Ground Truth** — 全量测试 **1531 passed**。
 
+### v1.0.6 — 2026-08-21
+
+- **Web UI v1** — 新增 `webui` CLI 子命令，启动轻量本地监控台（默认 `127.0.0.1:8080`）；基于 Python 标准库 `http.server`，零外部依赖；页面包括仪表盘 `/`、目标列表 `/targets`、事件详情 `/events/<id>`；JSON API 包括 `/api/targets`、`/api/events`（分页/过滤）、`/api/events/<id>`（含 signals）、`/api/stats`。
+- **Ground Truth** — 全量测试 **1540 passed**（含 9 个新增 Web UI 测试）。
+
 ### v1.0.5 — 2026-08-21
 
 - **Telegram / Discord 原生通知** — 新增 `TelegramSender`（Bot API `sendMessage`）与 `DiscordSender`（Webhook Embed）；`notify` 与 `digest` 均支持 `--telegram-bot-token` / `--telegram-chat-id` 与 `--channel discord`；Discord embed 描述自动截断至 4000 字符。
