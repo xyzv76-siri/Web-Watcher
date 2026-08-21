@@ -17,8 +17,16 @@ Design goals:
     - no false negatives (real changes must not be hidden)
 """
 
+import enum
 import re
 from typing import List, Optional, Pattern
+
+
+class NoiseReductionLevel(enum.Enum):
+    """Event noise filtering strength."""
+
+    STANDARD = "standard"
+    AGGRESSIVE = "aggressive"
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +78,7 @@ _OPAQUE_SESSION_RE: re.Pattern = re.compile(
 )
 
 
-def _default_patterns() -> List[re.Pattern]:
+def _standard_patterns() -> List[re.Pattern]:
     return [
         _ISO_TIMESTAMP_RE,
         _RFC1123_DATE_RE,
@@ -85,6 +93,32 @@ def _default_patterns() -> List[re.Pattern]:
     ]
 
 
+def _aggressive_patterns() -> List[re.Pattern]:
+    """Additional patterns for aggressive mode.
+
+    These are intentionally broader and may suppress some semantic
+    content; use only when false-positive noise is unavoidable.
+    """
+    return [
+        # Long pure-digit identifiers (6+ digits) that are not prices.
+        re.compile(r"\b\d{6,}\b"),
+        # Uppercase alphanumeric short codes (6-12 chars), e.g. build ids.
+        re.compile(r"\b[A-Z0-9]{6,12}\b"),
+        # Complete query strings including the leading ``?``.
+        re.compile(r"\?[^\s\"]+"),
+        # HTML class attributes.
+        re.compile(r'\bclass="[^"]+"'),
+        # HTML data-* attributes.
+        re.compile(r'\bdata-[a-zA-Z0-9-]+="[^"]+"'),
+    ]
+
+
+def _patterns_for_level(level: NoiseReductionLevel) -> List[re.Pattern]:
+    if level is NoiseReductionLevel.AGGRESSIVE:
+        return _standard_patterns() + _aggressive_patterns()
+    return _standard_patterns()
+
+
 class DynamicNoiseFilter:
     """Configurable dynamic noise filter.
 
@@ -93,8 +127,14 @@ class DynamicNoiseFilter:
         clean = noise_filter.filter("Price $99 at 2026-08-19T12:00:00Z session=abc123...")
     """
 
-    def __init__(self, patterns: Optional[List[Pattern]] = None, placeholder: str = ""):
-        self.patterns = patterns if patterns is not None else _default_patterns()
+    def __init__(
+        self,
+        patterns: Optional[List[Pattern]] = None,
+        placeholder: str = "",
+        level: NoiseReductionLevel = NoiseReductionLevel.STANDARD,
+    ):
+        self.level = level
+        self.patterns = patterns if patterns is not None else _patterns_for_level(level)
         self.placeholder = placeholder
 
     def filter(self, text: str) -> str:
@@ -134,13 +174,13 @@ def is_likely_dynamic_noise(text: str) -> bool:
 
     # If the entire text matches a single dynamic pattern, treat as noise.
     stripped = text.strip()
-    for pattern in _default_patterns():
+    for pattern in _standard_patterns():
         if pattern.fullmatch(stripped):
             return True
     return False
 
 
-def dynamic_noise_ratio(text: str) -> float:
+def dynamic_noise_ratio(text: str, level: NoiseReductionLevel = NoiseReductionLevel.STANDARD) -> float:
     """Estimate the fraction of *text* consumed by dynamic patterns.
 
     Returns a value in [0.0, 1.0].
@@ -149,13 +189,8 @@ def dynamic_noise_ratio(text: str) -> float:
         return 0.0
 
     total_len = len(text)
-    matched_len = 0
-    for pattern in _default_patterns():
-        for _ in pattern.finditer(text):
-            pass  # We just need the count of matches
-    # Simpler: compute length of all matched spans.
     covered_spans: List[tuple] = []
-    for pattern in _default_patterns():
+    for pattern in _patterns_for_level(level):
         for m in pattern.finditer(text):
             covered_spans.append((m.start(), m.end()))
     # Merge overlapping spans
@@ -170,9 +205,13 @@ def dynamic_noise_ratio(text: str) -> float:
     return min(1.0, covered / total_len)
 
 
-def contains_dynamic_noise(text: str, threshold: float = 0.3) -> bool:
+def contains_dynamic_noise(
+    text: str,
+    threshold: float = 0.3,
+    level: NoiseReductionLevel = NoiseReductionLevel.STANDARD,
+) -> bool:
     """Return True if dynamic noise exceeds *threshold* of the text."""
-    return dynamic_noise_ratio(text) >= threshold
+    return dynamic_noise_ratio(text, level=level) >= threshold
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +236,11 @@ class FalsePositiveGuard:
         self,
         noise_filter: Optional[DynamicNoiseFilter] = None,
         dynamic_noise_threshold: float = 0.5,
+        level: NoiseReductionLevel = NoiseReductionLevel.STANDARD,
     ):
-        self.noise_filter = noise_filter or DynamicNoiseFilter()
+        self.noise_filter = noise_filter or DynamicNoiseFilter(level=level)
         self.dynamic_noise_threshold = dynamic_noise_threshold
+        self.level = level
 
     def should_suppress_signal(
         self,
@@ -264,3 +305,4 @@ class FalsePositiveGuard:
             )
 
         return False, "No extractor reported a change"
+

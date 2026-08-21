@@ -16,7 +16,7 @@ from web_watcher.normalizer import normalize_extracted_text
 from web_watcher.web_fingerprint import observation_fingerprint, selector_config_fingerprint
 from web_watcher.diff import compute_diff, DiffResult
 from web_watcher.observation import ObservationResult, ObservationStatus
-from web_watcher.dynamic_noise import FalsePositiveGuard, DynamicNoiseFilter, dynamic_noise_ratio
+from web_watcher.dynamic_noise import FalsePositiveGuard, DynamicNoiseFilter, dynamic_noise_ratio, NoiseReductionLevel
 try:
     from web_watcher.models import Signal
 except ImportError:
@@ -59,6 +59,7 @@ class GenericWebTarget:
         custom_headers: Optional[Dict[str, Any]] = None,
         timeout: float = 10.0,
         false_positive_guard: Optional[FalsePositiveGuard] = None,
+        noise_reduction_level: str = "standard",
     ):
         _validate_url(target.url)
         for ext in (extractors or []):
@@ -67,7 +68,9 @@ class GenericWebTarget:
         self.extractors = extractors or []
         self.custom_headers = custom_headers or {}
         self.timeout = timeout
-        self.false_positive_guard = false_positive_guard or FalsePositiveGuard()
+        self.false_positive_guard = false_positive_guard or FalsePositiveGuard(
+            level=NoiseReductionLevel(noise_reduction_level),
+        )
 
     def execute(
         self,

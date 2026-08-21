@@ -140,11 +140,13 @@ class ScheduledRunner:
             extractors = rule.extractors if rule else []
             custom_headers = (rule.target.headers if rule else None) or target.metadata.get("headers", {})
             timeout = rule.target.timeout if rule else 10.0
+            noise_reduction_level = getattr(self.config, "noise_reduction_level", "standard")
             return GenericWebTarget(
                 target=target,
                 extractors=extractors,
                 custom_headers=custom_headers,
                 timeout=timeout,
+                noise_reduction_level=noise_reduction_level,
             )
 
     @staticmethod

@@ -143,3 +143,38 @@ def test_dispatcher_records_dispatch_after_success():
     assert result2.success is True
     assert result2.response_body == "suppressed"
     assert mock_sender.send.call_count == 1
+
+
+def test_similar_notification_silenced_within_window():
+    silencer = AlertSilencer(default_cooldown_seconds=300, similarity_threshold=0.9)
+    ntf1 = _make_notification()
+    ntf2 = Notification(
+        id=102,
+        event_id=203,
+        channel="slack",
+        status="pending",
+        created_at=datetime.now(timezone.utc),
+        payload={
+            "entity_id": "page_pricing",
+            "event_type": "dom_diff",
+            "title": "Pricing Modified",
+            "body": "DOM changed in pricing table v2",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    silencer.record_dispatch(ntf1, now=now)
+    silenced, reason = silencer.should_silence(ntf2, now=now + timedelta(seconds=301))
+    assert silenced is True
+    assert "similar" in reason.lower()
+
+
+def test_dissimilar_notification_not_silenced_by_similarity():
+    silencer = AlertSilencer(default_cooldown_seconds=300, similarity_threshold=0.9)
+    ntf1 = _make_notification()
+    ntf2 = _make_notification()
+    ntf2.payload["title"] = "Completely Different Alert"
+    ntf2.payload["body"] = "Totally unrelated content"
+    now = datetime.now(timezone.utc)
+    silencer.record_dispatch(ntf1, now=now)
+    silenced, _ = silencer.should_silence(ntf2, now=now + timedelta(seconds=301))
+    assert silenced is False

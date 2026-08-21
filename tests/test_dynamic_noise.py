@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from web_watcher.dynamic_noise import (
     DynamicNoiseFilter,
     FalsePositiveGuard,
+    NoiseReductionLevel,
     dynamic_noise_ratio,
     is_likely_dynamic_noise,
     contains_dynamic_noise,
@@ -71,6 +72,32 @@ class TestDynamicNoiseFilter:
         f = DynamicNoiseFilter()
         text = "Product price is $99.00 and available now"
         assert f.filter(text) == text
+
+    def test_aggressive_filter_removes_long_digit_sequences(self):
+        f = DynamicNoiseFilter(level=NoiseReductionLevel.AGGRESSIVE)
+        text = "Order 1234567890 confirmed"
+        assert "1234567890" not in f.filter(text)
+
+    def test_aggressive_filter_removes_query_string(self):
+        f = DynamicNoiseFilter(level=NoiseReductionLevel.AGGRESSIVE)
+        text = "https://example.com?utm_source=email&page=1"
+        filtered = f.filter(text)
+        assert "?" not in filtered
+        assert "utm_source" not in filtered
+
+    def test_aggressive_filter_removes_html_class(self):
+        f = DynamicNoiseFilter(level=NoiseReductionLevel.AGGRESSIVE)
+        text = '<div class="x y-z123">hello</div>'
+        filtered = f.filter(text)
+        assert 'class="' not in filtered
+        assert "hello" in filtered
+
+    def test_standard_does_not_remove_query_string(self):
+        f = DynamicNoiseFilter(level=NoiseReductionLevel.STANDARD)
+        text = "https://example.com?utm_source=email"
+        filtered = f.filter(text)
+        assert "utm_source" not in filtered
+        assert "?" in filtered
 
     def test_filter_normalize_combines_noise_removal_and_whitespace(self):
         f = DynamicNoiseFilter()
@@ -195,6 +222,26 @@ class TestFalsePositiveGuard:
             **self._guard_kwargs({"line": True}, {"line": curr}, {"line": prev})
         )
         # The semantic part ($99 -> $79) should keep the signal.
+        assert suppress is False
+        assert "Semantic change" in reason
+
+    def test_aggressive_mode_suppresses_long_digit_sequences(self):
+        guard = FalsePositiveGuard(level=NoiseReductionLevel.AGGRESSIVE)
+        prev = "Order 1234567890 confirmed"
+        curr = "Order 9876543210 confirmed"
+        suppress, reason = guard.should_suppress_signal(
+            **self._guard_kwargs({"order": True}, {"order": curr}, {"order": prev})
+        )
+        assert suppress is True
+        assert "dynamic noise" in reason.lower()
+
+    def test_aggressive_mode_keeps_real_word_changes(self):
+        guard = FalsePositiveGuard(level=NoiseReductionLevel.AGGRESSIVE)
+        prev = "Price $99 available"
+        curr = "Price $79 available"
+        suppress, reason = guard.should_suppress_signal(
+            **self._guard_kwargs({"price": True}, {"price": curr}, {"price": prev})
+        )
         assert suppress is False
         assert "Semantic change" in reason
 
