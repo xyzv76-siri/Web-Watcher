@@ -390,8 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     template_apply_parser.add_argument("preset", help="Preset name")
     template_apply_parser.add_argument("--url", required=True, help="Target URL")
-    template_apply_parser.add_argument("--repo", default=None, help="GitHub owner/repo (for github_* presets)")
-    template_apply_parser.add_argument("--selector", default=None, help="CSS selector (for blog_post/price presets)")
+    template_apply_parser.add_argument("--repo", default=None, help="GitHub owner/repo (for github_release preset)")
+    template_apply_parser.add_argument("--selector", default=None, help="CSS selector override (optional for most presets)")
     template_apply_parser.add_argument("--interval", default=None, help="Monitoring interval (e.g. 15m, 1h)")
     template_apply_parser.add_argument("--channel", default=None, help="Notification channel (default: console)")
     template_apply_parser.add_argument("--cooldown", default=None, help="Cooldown duration (e.g. 300s)")
@@ -876,6 +876,14 @@ def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
             overrides["selector"] = ".price"
         elif args.preset == "noise_reduction":
             overrides["selector"] = "body"
+        elif args.preset == "product_page":
+            example_url = "https://example.com/product/123"
+        elif args.preset == "news_article":
+            example_url = "https://example.com/news/article"
+        elif args.preset == "status_page":
+            example_url = "https://status.example.com"
+        elif args.preset == "changelog":
+            example_url = "https://github.com/owner/repo/blob/main/CHANGELOG.md"
 
         example_rule = preset.generate(example_url, **overrides)
         print("Example rule (illustrative):")

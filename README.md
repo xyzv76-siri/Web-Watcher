@@ -32,7 +32,7 @@ Target
 * **恢复能力** — 防崩溃状态持久化，自动 schema 初始化与过期声明清理。
 * **多 Worker 安全** — 通过 SQLite 锁串行化目标声明；重复声明会被拒绝。
 * **Docker 部署** — 非 root 用户镜像，挂载 `/data` 和 `/logs` 卷。
-* **监控模板（Preset）** — 内置 `github_release`、`blog_post`、`price` 等预设，可直接生成符合现有规则 schema 的 `rules.yaml`。
+* **监控模板（Preset）** — 内置 `github_release`、`blog_post`、`price`、`product_page`、`news_article`、`status_page`、`changelog` 等预设，可直接生成符合现有规则 schema 的 `rules.yaml`。
 
 ## 架构
 
@@ -141,6 +141,9 @@ python -m web_watcher.cli template show github_release
 python -m web_watcher.cli template apply github_release --url https://github.com/owner/repo
 python -m web_watcher.cli template apply blog_post --url https://example.com/blog --selector h1
 python -m web_watcher.cli template apply price --url https://example.com/product --selector ".price"
+python -m web_watcher.cli template apply product_page --url https://example.com/product/123
+python -m web_watcher.cli template apply status_page --url https://status.example.com
+python -m web_watcher.cli template apply changelog --url https://github.com/owner/repo/blob/main/CHANGELOG.md
 ```
 
 ### 监控目标
