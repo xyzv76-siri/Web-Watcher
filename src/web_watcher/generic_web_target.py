@@ -9,7 +9,8 @@ from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.fetch import FetchStatus
 from web_watcher.dom_extractor import DOMExtractor
-from web_watcher.rule_models import ExtractorConfig, ExtractionResult
+from web_watcher.rule_models import ExtractorConfig, ExtractionResult, WatcherRule
+from web_watcher.rule_evaluator import RuleEvaluator
 from web_watcher.execution_semantics import ExecutionOutcome, transition_for
 from web_watcher.targets import validate_selector, _validate_url
 from web_watcher.normalizer import normalize_extracted_text
@@ -61,6 +62,7 @@ class GenericWebTarget:
         false_positive_guard: Optional[FalsePositiveGuard] = None,
         noise_reduction_level: str = "standard",
         rule_status: str = "enabled",
+        rule: Optional[WatcherRule] = None,
     ):
         _validate_url(target.url)
         for ext in (extractors or []):
@@ -73,6 +75,7 @@ class GenericWebTarget:
             level=NoiseReductionLevel(noise_reduction_level),
         )
         self.rule_status = rule_status
+        self.rule = rule
 
     def execute(
         self,
@@ -128,6 +131,11 @@ class GenericWebTarget:
         headers_to_send = dict(self.custom_headers)
         headers_to_send.update(decision.headers)
 
+        meta = dict(self.target.metadata or {})
+        cookies = meta.get("cookies") or {}
+        basic_auth = meta.get("basic_auth")
+        proxy = meta.get("proxy")
+
         try:
             fetch_res: FetchResult = fetcher.fetch(
                 url=self.target.url,
@@ -135,6 +143,9 @@ class GenericWebTarget:
                 etag=self.target.etag,
                 last_modified=self.target.last_modified,
                 timeout=self.timeout,
+                cookies=cookies or None,
+                auth=tuple(basic_auth) if basic_auth else None,
+                proxy=proxy,
             )
         finally:
             # Release host claim after fetch completes (success or failure)
@@ -333,6 +344,29 @@ class GenericWebTarget:
                 observation_status = ObservationStatus.UNCHANGED
                 should_emit_signal = False
                 emit_reason = f"Change suppressed: {guard_reason}"
+            elif self.rule and self.rule.triggers:
+                old_ts = None
+                raw_old_ts = (self.target.metadata or {}).get("observation_timestamp") if isinstance(self.target.metadata, dict) else None
+                if raw_old_ts:
+                    try:
+                        old_ts = datetime.fromisoformat(raw_old_ts)
+                    except (ValueError, TypeError):
+                        old_ts = None
+                evaluation = RuleEvaluator.evaluate(
+                    self.rule,
+                    fetch_res.content,
+                    old_values=stored_previous,
+                    old_timestamp=old_ts,
+                    new_timestamp=now,
+                )
+                if evaluation.is_triggered:
+                    observation_status = ObservationStatus.CHANGED
+                    should_emit_signal = True
+                    emit_reason = f"Triggered: {len(evaluation.triggered_events)} event(s)"
+                else:
+                    observation_status = ObservationStatus.UNCHANGED
+                    should_emit_signal = False
+                    emit_reason = "Trigger conditions not met"
             else:
                 observation_status = ObservationStatus.CHANGED
                 should_emit_signal = True
@@ -405,6 +439,7 @@ class GenericWebTarget:
         updated_metadata["last_extracted"] = {
             k: v.value for k, v in extracted_results.items() if v.is_found
         }
+        updated_metadata["observation_timestamp"] = now.isoformat()
 
         if is_first_observation:
             updated_metadata["initialized"] = True

@@ -29,6 +29,9 @@ class SmartFetcher:
         etag: Optional[str] = None,
         last_modified: Optional[str] = None,
         timeout: Optional[float] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        auth: Optional[tuple] = None,
+        proxy: Optional[str] = None,
     ) -> FetchResult:
         timeout = timeout or self.default_timeout
         headers = dict(self.session.headers)
@@ -39,13 +42,20 @@ class SmartFetcher:
         if last_modified:
             headers["If-Modified-Since"] = last_modified
 
+        request_kwargs: Dict[str, Any] = {
+            "headers": headers,
+            "timeout": timeout,
+            "allow_redirects": False,
+        }
+        if cookies:
+            request_kwargs["cookies"] = cookies
+        if auth:
+            request_kwargs["auth"] = auth
+        if proxy:
+            request_kwargs["proxies"] = {"http": proxy, "https": proxy}
+
         try:
-            response = self.session.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-                allow_redirects=False,
-            )
+            response = self.session.get(url, **request_kwargs)
 
             status_code = response.status_code
             redirect_url = response.headers.get("Location") if status_code in (301, 302, 303, 307, 308) else None

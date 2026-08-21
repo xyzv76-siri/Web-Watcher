@@ -1,3 +1,4 @@
+from datetime import datetime
 from web_watcher.rule_evaluator import RuleEvaluator, EvaluationResult, TriggeredEvent
 from web_watcher.rule_models import WatcherRule, TargetConfig, ExtractorConfig, TriggerConfig, RoutingConfig
 
@@ -93,3 +94,46 @@ def test_evaluate_returns_extracted_values():
     result = RuleEvaluator.evaluate(rule, HTML_DOC)
     assert "price" in result.extracted_values
     assert result.extracted_values["price"] == 99.00
+
+
+def test_time_window_minutes_blocks_old_change():
+    rule = WatcherRule(
+        id="tw_rule",
+        name="TimeWindow Rule",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[TriggerConfig(type="numeric_delta", field="price", condition="abs_delta > 0.01", time_window_minutes=30)],
+        routing=RoutingConfig(),
+    )
+    old_ts = datetime(2024, 1, 1, 12, 0, 0)
+    new_ts = datetime(2024, 1, 1, 12, 35, 0)  # 35 minutes later
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00}, old_timestamp=old_ts, new_timestamp=new_ts)
+    assert result.is_triggered is False
+
+
+def test_time_window_minutes_allows_recent_change():
+    rule = WatcherRule(
+        id="tw_rule",
+        name="TimeWindow Rule",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[TriggerConfig(type="numeric_delta", field="price", condition="abs_delta > 0.01", time_window_minutes=30)],
+        routing=RoutingConfig(),
+    )
+    old_ts = datetime(2024, 1, 1, 12, 0, 0)
+    new_ts = datetime(2024, 1, 1, 12, 25, 0)  # 25 minutes later
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00}, old_timestamp=old_ts, new_timestamp=new_ts)
+    assert result.is_triggered is True
+
+
+def test_time_window_minutes_passes_without_timestamps():
+    rule = WatcherRule(
+        id="tw_rule",
+        name="TimeWindow Rule",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[TriggerConfig(type="numeric_delta", field="price", condition="abs_delta > 0.01", time_window_minutes=30)],
+        routing=RoutingConfig(),
+    )
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00})
+    assert result.is_triggered is True

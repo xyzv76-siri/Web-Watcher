@@ -1261,6 +1261,19 @@ class Repository:
             # Column already exists
             pass
 
+    def _init_user_presets_table(self):
+        """User custom presets table."""
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS user_presets (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT '',
+                yaml_content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        self.connection.commit()
+
     def acquire_host_request(
         self,
         host: str,
@@ -1692,6 +1705,18 @@ class Repository:
                 ))
             return cursor.rowcount > 0
 
+    def delete_target(self, target_id: str) -> bool:
+        """Delete a target by ID.
+        
+        Returns True if the target was deleted, False if it did not exist.
+        Note: This only removes the target record. Associated entities,
+        signals, and events are preserved for audit purposes.
+        """
+        self._init_target_table()
+        cursor = self.connection.execute("DELETE FROM targets WHERE id = ?", (target_id,))
+        self.connection.commit()
+        return cursor.rowcount > 0
+
     def release_target_lease(
         self,
         target_id: str,
@@ -1935,6 +1960,64 @@ class Repository:
             logger.exception("finalize_execution failed for correlation plan")
             return False
 
+    # User presets (Phase 20-D)
+    def save_user_preset(self, name: str, yaml_content: str, description: str = "") -> bool:
+        """Save a user custom preset."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO user_presets (name, description, yaml_content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    description = excluded.description,
+                    yaml_content = excluded.yaml_content,
+                    updated_at = excluded.updated_at
+                """,
+                (name, description, yaml_content, now, now),
+            )
+            self.connection.commit()
+            return True
+        except Exception:
+            return False
+
+    def get_user_preset(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a user custom preset by name."""
+        row = self.connection.execute(
+            "SELECT name, description, yaml_content, created_at, updated_at FROM user_presets WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "name": row[0],
+            "description": row[1],
+            "yaml_content": row[2],
+            "created_at": row[3],
+            "updated_at": row[4],
+        }
+
+    def list_user_presets(self) -> List[Dict[str, Any]]:
+        """List all user custom presets."""
+        rows = self.connection.execute(
+            "SELECT name, description, created_at, updated_at FROM user_presets ORDER BY name ASC"
+        ).fetchall()
+        return [
+            {
+                "name": row[0],
+                "description": row[1],
+                "created_at": row[2],
+                "updated_at": row[3],
+            }
+            for row in rows
+        ]
+
+    def delete_user_preset(self, name: str) -> bool:
+        """Delete a user custom preset."""
+        cur = self.connection.execute("DELETE FROM user_presets WHERE name = ?", (name,))
+        self.connection.commit()
+        return cur.rowcount > 0
+
     def commit_plan(
         self,
         correlation_plan: Any,
@@ -2052,3 +2135,61 @@ class Repository:
         except Exception:
             logger.exception("finalize_execution failed for correlation plan")
             return False
+
+    # User presets (Phase 20-D)
+    def save_user_preset(self, name: str, yaml_content: str, description: str = "") -> bool:
+        """Save a user custom preset."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.connection.execute(
+                """
+                INSERT INTO user_presets (name, description, yaml_content, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    description = excluded.description,
+                    yaml_content = excluded.yaml_content,
+                    updated_at = excluded.updated_at
+                """,
+                (name, description, yaml_content, now, now),
+            )
+            self.connection.commit()
+            return True
+        except Exception:
+            return False
+
+    def get_user_preset(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get a user custom preset by name."""
+        row = self.connection.execute(
+            "SELECT name, description, yaml_content, created_at, updated_at FROM user_presets WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "name": row[0],
+            "description": row[1],
+            "yaml_content": row[2],
+            "created_at": row[3],
+            "updated_at": row[4],
+        }
+
+    def list_user_presets(self) -> List[Dict[str, Any]]:
+        """List all user custom presets."""
+        rows = self.connection.execute(
+            "SELECT name, description, created_at, updated_at FROM user_presets ORDER BY name ASC"
+        ).fetchall()
+        return [
+            {
+                "name": row[0],
+                "description": row[1],
+                "created_at": row[2],
+                "updated_at": row[3],
+            }
+            for row in rows
+        ]
+
+    def delete_user_preset(self, name: str) -> bool:
+        """Delete a user custom preset."""
+        cur = self.connection.execute("DELETE FROM user_presets WHERE name = ?", (name,))
+        self.connection.commit()
+        return cur.rowcount > 0

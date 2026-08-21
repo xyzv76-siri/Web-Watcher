@@ -8,6 +8,10 @@ class TargetConfig:
     interval: str = "15m"
     timeout: float = 10.0
     headers: Dict[str, str] = field(default_factory=dict)
+    cookies: Dict[str, str] = field(default_factory=dict)
+    basic_auth: Optional[Dict[str, str]] = None
+    proxy: Optional[str] = None
+    js_render: bool = False
 
 
 @dataclass
@@ -27,6 +31,11 @@ class TriggerConfig:
     importance: str = "important"
     title_template: Optional[str] = None
     body_template: Optional[str] = None
+    # AND/OR condition group: list of conditions combined with operator
+    condition_group: Optional[List[Dict[str, Any]]] = None
+    condition_operator: Optional[str] = None  # "AND" or "OR"
+    # Time window: only trigger if change occurred within last N minutes
+    time_window_minutes: Optional[int] = None
 
 
 @dataclass

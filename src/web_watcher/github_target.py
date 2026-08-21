@@ -62,7 +62,7 @@ class GitHubTarget:
     ):
         self.target = target
         self.owner, self.repo_name = parse_github_repo(target.url)
-        self.watch_types = set(watch_types or ["releases", "stars", "tags"])
+        self.watch_types = set(watch_types or ["releases", "stars", "tags", "commits", "prs", "issues"])
         self.token = token or os.getenv("GITHUB_TOKEN")
         self.star_delta_threshold = max(1, star_delta_threshold)
         self.timeout = timeout
@@ -135,6 +135,11 @@ class GitHubTarget:
         now = now or datetime.now(timezone.utc)
         fetcher = fetcher or SmartFetcher(default_timeout=self.timeout)
         policy = policy or FetchPolicy()
+        meta = dict(self.target.metadata or {})
+        meta["observation_timestamp"] = now.isoformat()
+        cookies = meta.get("cookies") or {}
+        basic_auth = meta.get("basic_auth")
+        proxy = meta.get("proxy")
 
         if self.rule_status == "disabled":
             return GitHubTargetExecutionResult(
@@ -172,6 +177,7 @@ class GitHubTarget:
             )
 
         meta = dict(self.target.metadata or {})
+        meta["observation_timestamp"] = now.isoformat()
         signals: List[Any] = []
         is_any_304 = False
         last_status_code = 200
@@ -234,7 +240,14 @@ class GitHubTarget:
                     _claim(rel_host)
 
                 rel_etag = meta.get("release_etag")
-                res = fetcher.fetch(rel_url, custom_headers=self._build_headers(rel_etag), timeout=self.timeout)
+                res = fetcher.fetch(
+                    rel_url,
+                    custom_headers=self._build_headers(rel_etag),
+                    timeout=self.timeout,
+                    cookies=cookies or None,
+                    auth=tuple(basic_auth) if basic_auth else None,
+                    proxy=proxy,
+                )
 
                 headers_map = {}
                 if isinstance(res.metadata, dict):
@@ -320,7 +333,14 @@ class GitHubTarget:
                     _claim(repo_host)
 
                 repo_etag = meta.get("repo_etag")
-                res = fetcher.fetch(repo_url, custom_headers=self._build_headers(repo_etag), timeout=self.timeout)
+                res = fetcher.fetch(
+                    repo_url,
+                    custom_headers=self._build_headers(repo_etag),
+                    timeout=self.timeout,
+                    cookies=cookies or None,
+                    auth=tuple(basic_auth) if basic_auth else None,
+                    proxy=proxy,
+                )
 
                 headers_map = {}
                 if isinstance(res.metadata, dict):
@@ -382,6 +402,284 @@ class GitHubTarget:
                     else:
                         repo_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
                 last_status_code = res.status_code
+
+            # 3b. 检查 Commits
+            commits_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+            commits_eval = None
+            if "commits" in self.watch_types and self.target.status == TargetStatus.NORMAL and not _should_skip_subresource("commits", now):
+                commits_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/commits?per_page=1"
+                commits_host = _extract_host(commits_url)
+                if commits_host and policy.host_rate_limiter:
+                    allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(commits_host, now)
+                    if not allowed:
+                        return GitHubTargetExecutionResult(
+                            target_id=self.target.id,
+                            allowed=False,
+                            status_code=None,
+                            new_status=self.target.status,
+                            signals_emitted=[],
+                            reason=f"Host '{commits_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                            outcome=ExecutionOutcome.POLICY_BLOCKED,
+                            transition=transition_for(
+                                ExecutionOutcome.POLICY_BLOCKED,
+                                target=self.target,
+                                now=now,
+                            ),
+                        )
+                    _claim(commits_host)
+
+                commits_etag = meta.get("commits_etag")
+                res = fetcher.fetch(
+                    commits_url,
+                    custom_headers=self._build_headers(commits_etag),
+                    timeout=self.timeout,
+                    cookies=cookies or None,
+                    auth=tuple(basic_auth) if basic_auth else None,
+                    proxy=proxy,
+                )
+
+                headers_map = {}
+                if isinstance(res.metadata, dict):
+                    headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+                commits_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+                if res.error:
+                    fetch_error = res.error
+
+                if res.status == FetchStatus.NOT_MODIFIED:
+                    is_any_304 = True
+                    commits_outcome = ExecutionOutcome.NOT_MODIFIED
+                elif res.status_code == 200 and res.content:
+                    try:
+                        commits_data = json.loads(res.content)
+                        if isinstance(commits_data, list) and commits_data:
+                            latest_sha = commits_data[0].get("sha")
+                            prev_sha = meta.get("last_commit_sha")
+
+                            meta["commits_etag"] = res.etag
+                            meta["last_commit_sha"] = latest_sha
+
+                            if prev_sha is not None and prev_sha != latest_sha and latest_sha is not None:
+                                payload = {
+                                    "owner": self.owner,
+                                    "repo": self.repo_name,
+                                    "sha": latest_sha,
+                                    "message": (commits_data[0].get("commit") or {}).get("message", ""),
+                                    "author": ((commits_data[0].get("commit") or {}).get("author") or {}).get("name"),
+                                    "url": commits_data[0].get("html_url"),
+                                    "source": commits_url,
+                                    "fetched_at": now.isoformat(),
+                                }
+                                if not self._is_duplicate_signal(SignalType.COMMIT_PUSHED, payload, meta):
+                                    sig = self._create_signal(SignalType.COMMIT_PUSHED, payload, now)
+                                    signals.append(sig)
+                                    self._record_signal_fingerprint(SignalType.COMMIT_PUSHED, payload, meta)
+                                    commits_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                                else:
+                                    commits_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                            else:
+                                commits_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                        else:
+                            commits_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        commits_outcome = ExecutionOutcome.TRANSFORM_ERROR
+                else:
+                    if commits_eval and commits_eval.new_status == TargetStatus.COOLDOWN:
+                        commits_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                    elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                        commits_outcome = ExecutionOutcome.TIMEOUT
+                    elif res.error or (res.status_code is not None and res.status_code >= 400):
+                        commits_outcome = ExecutionOutcome.FETCH_FAILED
+                    else:
+                        commits_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                last_status_code = res.status_code
+
+            # 3c. 检查 Pull Requests
+            prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+            prs_eval = None
+            if "prs" in self.watch_types and self.target.status == TargetStatus.NORMAL and not _should_skip_subresource("prs", now):
+                prs_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/pulls?state=all&per_page=5&sort=updated&direction=desc"
+                prs_host = _extract_host(prs_url)
+                if prs_host and policy.host_rate_limiter:
+                    allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(prs_host, now)
+                    if not allowed:
+                        return GitHubTargetExecutionResult(
+                            target_id=self.target.id,
+                            allowed=False,
+                            status_code=None,
+                            new_status=self.target.status,
+                            signals_emitted=[],
+                            reason=f"Host '{prs_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                            outcome=ExecutionOutcome.POLICY_BLOCKED,
+                            transition=transition_for(
+                                ExecutionOutcome.POLICY_BLOCKED,
+                                target=self.target,
+                                now=now,
+                            ),
+                        )
+                    _claim(prs_host)
+
+                prs_etag = meta.get("prs_etag")
+                res = fetcher.fetch(
+                    prs_url,
+                    custom_headers=self._build_headers(prs_etag),
+                    timeout=self.timeout,
+                    cookies=cookies or None,
+                    auth=tuple(basic_auth) if basic_auth else None,
+                    proxy=proxy,
+                )
+
+                headers_map = {}
+                if isinstance(res.metadata, dict):
+                    headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+                prs_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+                if res.error:
+                    fetch_error = res.error
+
+                if res.status == FetchStatus.NOT_MODIFIED:
+                    is_any_304 = True
+                    prs_outcome = ExecutionOutcome.NOT_MODIFIED
+                elif res.status_code == 200 and res.content:
+                    try:
+                        prs_data = json.loads(res.content)
+                        if isinstance(prs_data, list):
+                            latest_pr = prs_data[0] if prs_data else None
+                            latest_pr_number = str(latest_pr.get("number")) if latest_pr else None
+                            latest_pr_state = latest_pr.get("state") if latest_pr else None
+                            prev_snapshot = meta.get("last_pr_snapshot")
+
+                            meta["prs_etag"] = res.etag
+                            meta["last_pr_snapshot"] = {"number": latest_pr_number, "state": latest_pr_state, "updated_at": latest_pr.get("updated_at")} if latest_pr else None
+
+                            if prev_snapshot and latest_pr_number:
+                                prev_state = prev_snapshot.get("state")
+                                if prev_state != latest_pr_state:
+                                    payload = {
+                                        "owner": self.owner,
+                                        "repo": self.repo_name,
+                                        "pr_number": latest_pr_number,
+                                        "state": latest_pr_state,
+                                        "title": latest_pr.get("title"),
+                                        "html_url": latest_pr.get("html_url"),
+                                        "source": prs_url,
+                                        "fetched_at": now.isoformat(),
+                                    }
+                                    if not self._is_duplicate_signal(SignalType.PR_STATUS_CHANGED, payload, meta):
+                                        sig = self._create_signal(SignalType.PR_STATUS_CHANGED, payload, now)
+                                        signals.append(sig)
+                                        self._record_signal_fingerprint(SignalType.PR_STATUS_CHANGED, payload, meta)
+                                        prs_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                                    else:
+                                        prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                                else:
+                                    prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                            else:
+                                prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                        else:
+                            prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        prs_outcome = ExecutionOutcome.TRANSFORM_ERROR
+                else:
+                    if prs_eval and prs_eval.new_status == TargetStatus.COOLDOWN:
+                        prs_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                    elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                        prs_outcome = ExecutionOutcome.TIMEOUT
+                    elif res.error or (res.status_code is not None and res.status_code >= 400):
+                        prs_outcome = ExecutionOutcome.FETCH_FAILED
+                    else:
+                        prs_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                last_status_code = res.status_code
+
+            # 3d. 检查 Issues
+            issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+            issues_eval = None
+            if "issues" in self.watch_types and self.target.status == TargetStatus.NORMAL and not _should_skip_subresource("issues", now):
+                issues_url = f"{self.BASE_API}/repos/{self.owner}/{self.repo_name}/issues?state=all&per_page=5&sort=updated&direction=desc"
+                issues_host = _extract_host(issues_url)
+                if issues_host and policy.host_rate_limiter:
+                    allowed, _, wait_seconds, _ = policy.host_rate_limiter.prepare_request(issues_host, now)
+                    if not allowed:
+                        return GitHubTargetExecutionResult(
+                            target_id=self.target.id,
+                            allowed=False,
+                            status_code=None,
+                            new_status=self.target.status,
+                            signals_emitted=[],
+                            reason=f"Host '{issues_host}' rate-limited ({int(wait_seconds or 0)}s remaining)",
+                            outcome=ExecutionOutcome.POLICY_BLOCKED,
+                            transition=transition_for(
+                                ExecutionOutcome.POLICY_BLOCKED,
+                                target=self.target,
+                                now=now,
+                            ),
+                        )
+                    _claim(issues_host)
+
+                issues_etag = meta.get("issues_etag")
+                res = fetcher.fetch(issues_url, custom_headers=self._build_headers(issues_etag), timeout=self.timeout)
+
+                headers_map = {}
+                if isinstance(res.metadata, dict):
+                    headers_map = {k.lower(): v for k, v in res.metadata.get("headers", {}).items()}
+                issues_eval = policy.evaluate_response(self.target, res.status_code, headers=headers_map, error=res.error, now=now)
+
+                if res.error:
+                    fetch_error = res.error
+
+                if res.status == FetchStatus.NOT_MODIFIED:
+                    is_any_304 = True
+                    issues_outcome = ExecutionOutcome.NOT_MODIFIED
+                elif res.status_code == 200 and res.content:
+                    try:
+                        issues_data = json.loads(res.content)
+                        if isinstance(issues_data, list):
+                            latest_issue = issues_data[0] if issues_data else None
+                            latest_issue_number = str(latest_issue.get("number")) if latest_issue else None
+                            latest_issue_state = latest_issue.get("state") if latest_issue else None
+                            prev_issue_snapshot = meta.get("last_issue_snapshot")
+
+                            meta["issues_etag"] = res.etag
+                            meta["last_issue_snapshot"] = {"number": latest_issue_number, "state": latest_issue_state, "updated_at": latest_issue.get("updated_at")} if latest_issue else None
+
+                            if prev_issue_snapshot and latest_issue_number:
+                                prev_state = prev_issue_snapshot.get("state")
+                                if prev_state != latest_issue_state:
+                                    payload = {
+                                        "owner": self.owner,
+                                        "repo": self.repo_name,
+                                        "issue_number": latest_issue_number,
+                                        "state": latest_issue_state,
+                                        "title": latest_issue.get("title"),
+                                        "html_url": latest_issue.get("html_url"),
+                                        "source": issues_url,
+                                        "fetched_at": now.isoformat(),
+                                    }
+                                    if not self._is_duplicate_signal(SignalType.ISSUE_UPDATED, payload, meta):
+                                        sig = self._create_signal(SignalType.ISSUE_UPDATED, payload, now)
+                                        signals.append(sig)
+                                        self._record_signal_fingerprint(SignalType.ISSUE_UPDATED, payload, meta)
+                                        issues_outcome = ExecutionOutcome.SUCCESS_CHANGED
+                                    else:
+                                        issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                                else:
+                                    issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                            else:
+                                issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                        else:
+                            issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        issues_outcome = ExecutionOutcome.TRANSFORM_ERROR
+                else:
+                    if issues_eval and issues_eval.new_status == TargetStatus.COOLDOWN:
+                        issues_outcome = ExecutionOutcome.POLICY_COOLDOWN
+                    elif res.status == FetchStatus.TIMEOUT or (res.status_code is not None and res.status_code == 0):
+                        issues_outcome = ExecutionOutcome.TIMEOUT
+                    elif res.error or (res.status_code is not None and res.status_code >= 400):
+                        issues_outcome = ExecutionOutcome.FETCH_FAILED
+                    else:
+                        issues_outcome = ExecutionOutcome.SUCCESS_UNCHANGED
+                last_status_code = res.status_code
         finally:
             _release_claims()
 
@@ -389,16 +687,14 @@ class GitHubTarget:
         if signals:
             outcome = ExecutionOutcome.SUCCESS_CHANGED
         elif is_any_304:
-            # Any checked watch type returned 304 → overall NOT_MODIFIED.
-            # Unchecked watch types keep their initial SUCCESS_UNCHANGED and must not block this.
             outcome = ExecutionOutcome.NOT_MODIFIED
-        elif release_outcome == ExecutionOutcome.POLICY_COOLDOWN or repo_outcome == ExecutionOutcome.POLICY_COOLDOWN:
+        elif release_outcome == ExecutionOutcome.POLICY_COOLDOWN or repo_outcome == ExecutionOutcome.POLICY_COOLDOWN or commits_outcome == ExecutionOutcome.POLICY_COOLDOWN or prs_outcome == ExecutionOutcome.POLICY_COOLDOWN or issues_outcome == ExecutionOutcome.POLICY_COOLDOWN:
             outcome = ExecutionOutcome.POLICY_COOLDOWN
-        elif release_outcome == ExecutionOutcome.TIMEOUT or repo_outcome == ExecutionOutcome.TIMEOUT:
+        elif release_outcome == ExecutionOutcome.TIMEOUT or repo_outcome == ExecutionOutcome.TIMEOUT or commits_outcome == ExecutionOutcome.TIMEOUT or prs_outcome == ExecutionOutcome.TIMEOUT or issues_outcome == ExecutionOutcome.TIMEOUT:
             outcome = ExecutionOutcome.TIMEOUT
-        elif release_outcome == ExecutionOutcome.FETCH_FAILED or repo_outcome == ExecutionOutcome.FETCH_FAILED:
+        elif release_outcome == ExecutionOutcome.FETCH_FAILED or repo_outcome == ExecutionOutcome.FETCH_FAILED or commits_outcome == ExecutionOutcome.FETCH_FAILED or prs_outcome == ExecutionOutcome.FETCH_FAILED or issues_outcome == ExecutionOutcome.FETCH_FAILED:
             outcome = ExecutionOutcome.FETCH_FAILED
-        elif release_outcome == ExecutionOutcome.TRANSFORM_ERROR or repo_outcome == ExecutionOutcome.TRANSFORM_ERROR:
+        elif release_outcome == ExecutionOutcome.TRANSFORM_ERROR or repo_outcome == ExecutionOutcome.TRANSFORM_ERROR or commits_outcome == ExecutionOutcome.TRANSFORM_ERROR or prs_outcome == ExecutionOutcome.TRANSFORM_ERROR or issues_outcome == ExecutionOutcome.TRANSFORM_ERROR:
             outcome = ExecutionOutcome.TRANSFORM_ERROR
         else:
             outcome = ExecutionOutcome.SUCCESS_UNCHANGED
@@ -424,40 +720,59 @@ class GitHubTarget:
                 "consecutive_failures": repo_eval.consecutive_failures,
                 "next_allowed_at": next_allowed_iso,
             }
+        if commits_eval is not None:
+            next_allowed_iso = None
+            if commits_eval.next_allowed_at is not None:
+                next_allowed_iso = commits_eval.next_allowed_at.isoformat()
+            subresource_states["commits"] = {
+                "status": commits_eval.new_status.value.upper() if hasattr(commits_eval.new_status, "value") else str(commits_eval.new_status).upper(),
+                "consecutive_failures": commits_eval.consecutive_failures,
+                "next_allowed_at": next_allowed_iso,
+            }
+        if prs_eval is not None:
+            next_allowed_iso = None
+            if prs_eval.next_allowed_at is not None:
+                next_allowed_iso = prs_eval.next_allowed_at.isoformat()
+            subresource_states["prs"] = {
+                "status": prs_eval.new_status.value.upper() if hasattr(prs_eval.new_status, "value") else str(prs_eval.new_status).upper(),
+                "consecutive_failures": prs_eval.consecutive_failures,
+                "next_allowed_at": next_allowed_iso,
+            }
+        if issues_eval is not None:
+            next_allowed_iso = None
+            if issues_eval.next_allowed_at is not None:
+                next_allowed_iso = issues_eval.next_allowed_at.isoformat()
+            subresource_states["issues"] = {
+                "status": issues_eval.new_status.value.upper() if hasattr(issues_eval.new_status, "value") else str(issues_eval.new_status).upper(),
+                "consecutive_failures": issues_eval.consecutive_failures,
+                "next_allowed_at": next_allowed_iso,
+            }
         if subresource_states:
             meta["subresource_states"] = subresource_states
 
         # 4-2. Merge subresource states into composite target state.
         # This is only for scheduling/backoff semantics; signals are independent.
-        if release_eval and repo_eval:
+        evals = [e for e in [release_eval, repo_eval, commits_eval, prs_eval, issues_eval] if e is not None]
+        if evals:
             severity = {
                 TargetStatus.COOLDOWN: 0,
                 TargetStatus.BACKOFF: 1,
                 TargetStatus.NORMAL: 2,
             }
-            if severity[release_eval.new_status] <= severity[repo_eval.new_status]:
-                observed_status = release_eval.new_status
-                observed_consecutive_failures = release_eval.consecutive_failures
-                observed_next_allowed_at = release_eval.next_allowed_at
-            else:
-                observed_status = repo_eval.new_status
-                observed_consecutive_failures = repo_eval.consecutive_failures
-                observed_next_allowed_at = repo_eval.next_allowed_at
-        elif release_eval:
-            observed_status = release_eval.new_status
-            observed_consecutive_failures = release_eval.consecutive_failures
-            observed_next_allowed_at = release_eval.next_allowed_at
-        elif repo_eval:
-            observed_status = repo_eval.new_status
-            observed_consecutive_failures = repo_eval.consecutive_failures
-            observed_next_allowed_at = repo_eval.next_allowed_at
+            worst = evals[0]
+            for e in evals[1:]:
+                if severity[e.new_status] <= severity[worst.new_status]:
+                    worst = e
+            observed_status = worst.new_status
+            observed_consecutive_failures = worst.consecutive_failures
+            observed_next_allowed_at = worst.next_allowed_at
         else:
             observed_status = TargetStatus.NORMAL
             observed_consecutive_failures = 0
             observed_next_allowed_at = None
 
         # 5. Build transition
-        combined_etag = meta.get("release_etag") or meta.get("repo_etag")
+        combined_etag = meta.get("release_etag") or meta.get("repo_etag") or meta.get("commits_etag") or meta.get("prs_etag") or meta.get("issues_etag")
         transition = transition_for(
             outcome,
             target=self.target,

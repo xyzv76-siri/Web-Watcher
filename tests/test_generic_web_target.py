@@ -358,3 +358,85 @@ def test_generic_web_target_without_scope_keeps_existing_behavior():
     assert res.status_code == 200
     assert len(res.signals_emitted) == 1
     assert res.outcome == ExecutionOutcome.SUCCESS_CHANGED
+
+
+def test_generic_web_target_trigger_emits_signal_within_window():
+    from web_watcher.rule_models import WatcherRule, TargetConfig, TriggerConfig, RoutingConfig
+
+    now = datetime.utcnow()
+    old_ts = now - timedelta(minutes=10)
+    target = Target(
+        id="t_trigger",
+        url="https://example.com/pricing",
+        metadata={
+            "initialized": True,
+            "normalized_values": {"price": "99.0"},
+            "observation_timestamp": old_ts.isoformat(),
+        },
+    )
+    rule = WatcherRule(
+        id="rule_trigger",
+        name="Trigger Rule",
+        target=TargetConfig(url="https://example.com/pricing"),
+        extractors=_make_extractors(),
+        triggers=[TriggerConfig(type="numeric_delta", field="price", condition="abs_delta > 0.01", time_window_minutes=30)],
+        routing=RoutingConfig(),
+    )
+    adapter = GenericWebTarget(target=target, extractors=rule.extractors, rule=rule)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_trigger",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V2,
+        etag='"etag-v2"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 1
+    assert "Triggered" in res.reason
+
+
+def test_generic_web_target_trigger_does_not_emit_signal_outside_window():
+    from web_watcher.rule_models import WatcherRule, TargetConfig, TriggerConfig, RoutingConfig
+
+    now = datetime.utcnow()
+    old_ts = now - timedelta(minutes=40)
+    target = Target(
+        id="t_trigger",
+        url="https://example.com/pricing",
+        metadata={
+            "initialized": True,
+            "normalized_values": {"price": "99.0"},
+            "observation_timestamp": old_ts.isoformat(),
+        },
+    )
+    rule = WatcherRule(
+        id="rule_trigger",
+        name="Trigger Rule",
+        target=TargetConfig(url="https://example.com/pricing"),
+        extractors=_make_extractors(),
+        triggers=[TriggerConfig(type="numeric_delta", field="price", condition="abs_delta > 0.01", time_window_minutes=30)],
+        routing=RoutingConfig(),
+    )
+    adapter = GenericWebTarget(target=target, extractors=rule.extractors, rule=rule)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_trigger",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V2,
+        etag='"etag-v2"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 0
+    assert "Trigger conditions not met" in res.reason

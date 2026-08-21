@@ -73,6 +73,9 @@ class RuleParser:
                     importance=trg.get("importance", "important"),
                     title_template=trg.get("title_template"),
                     body_template=trg.get("body_template"),
+                    condition_group=trg.get("condition_group"),
+                    condition_operator=trg.get("condition_operator"),
+                    time_window_minutes=trg.get("time_window_minutes"),
                 ))
 
             routing_dict = raw_rule.get("routing", {})

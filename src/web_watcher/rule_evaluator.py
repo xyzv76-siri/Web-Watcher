@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from web_watcher.rule_models import WatcherRule, TriggerConfig
 from web_watcher.dom_extractor import DOMExtractor
@@ -55,6 +56,54 @@ class RuleEvaluator:
             return str(old_val) != str(new_val)
 
     @classmethod
+    def evaluate_condition_group(cls, condition_group: Optional[List[Dict[str, Any]]], operator: Optional[str], old_val: Any, new_val: Any) -> bool:
+        """Evaluate a group of conditions with AND/OR operator."""
+        if not condition_group:
+            return cls.evaluate_condition(None, old_val, new_val)
+
+        results = []
+        for cond in condition_group:
+            cond_type = cond.get("type", "simple")
+            if cond_type == "simple":
+                cond_expr = cond.get("condition")
+                results.append(cls.evaluate_condition(cond_expr, old_val, new_val))
+            elif cond_type == "numeric_delta":
+                cond_expr = cond.get("condition")
+                results.append(cls.evaluate_condition(cond_expr, old_val, new_val))
+            elif cond_type == "regex_match":
+                pattern = cond.get("pattern")
+                if pattern:
+                    results.append(bool(re.search(pattern, str(new_val))))
+                else:
+                    results.append(old_val != new_val)
+            else:
+                results.append(old_val != new_val)
+
+        if not results:
+            return False
+
+        if operator == "OR":
+            return any(results)
+        else:  # Default AND
+            return all(results)
+
+    @classmethod
+    def check_time_window(cls, trigger: TriggerConfig, old_timestamp: Optional[datetime] = None, new_timestamp: Optional[datetime] = None) -> bool:
+        """Check if change is within time window.
+        
+        Returns True if:
+        - No time_window_minutes is set on the trigger
+        - Timestamps are not available (cannot filter, pass through)
+        - The time between old and new observation is within the window
+        """
+        if trigger.time_window_minutes is None:
+            return True
+        if old_timestamp is None or new_timestamp is None:
+            return True
+        delta_minutes = (new_timestamp - old_timestamp).total_seconds() / 60.0
+        return delta_minutes <= trigger.time_window_minutes
+
+    @classmethod
     def render_template(cls, template: Optional[str], context: Dict[str, Any], default: str) -> str:
         if not template:
             return default
@@ -69,6 +118,8 @@ class RuleEvaluator:
         rule: WatcherRule,
         new_html: str,
         old_values: Optional[Dict[str, Any]] = None,
+        old_timestamp: Optional[datetime] = None,
+        new_timestamp: Optional[datetime] = None,
     ) -> EvaluationResult:
         old_values = old_values or {}
         extracted: Dict[str, Any] = {}
@@ -94,7 +145,11 @@ class RuleEvaluator:
                 if trg.type == "text_diff":
                     is_trg = str(old_val) != str(new_val)
                 elif trg.type == "numeric_delta":
-                    is_trg = cls.evaluate_condition(trg.condition, old_val, new_val)
+                    # Support condition_group (AND/OR) or legacy single condition
+                    if trg.condition_group:
+                        is_trg = cls.evaluate_condition_group(trg.condition_group, trg.condition_operator, old_val, new_val)
+                    else:
+                        is_trg = cls.evaluate_condition(trg.condition, old_val, new_val)
                 elif trg.type == "regex_match":
                     if trg.condition:
                         is_trg = bool(re.search(trg.condition, str(new_val)))
@@ -104,6 +159,10 @@ class RuleEvaluator:
                     is_trg = old_val != new_val
                 else:
                     is_trg = old_val != new_val
+
+            # Time window check (post-trigger filter)
+            if is_trg and trg.time_window_minutes is not None:
+                is_trg = cls.check_time_window(trg, old_timestamp=old_timestamp, new_timestamp=new_timestamp)
 
             if is_trg:
                 delta_num = 0.0

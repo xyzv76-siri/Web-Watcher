@@ -224,6 +224,16 @@ class ScheduledRunner:
                 continue
 
             existing = self.repo.get_target(rule.id)
+            rule_meta = {
+                "rule_name": rule.name,
+                "headers": rule.target.headers,
+                "routing_channels": rule.routing.channels,
+                "cooldown": rule.routing.cooldown,
+                "cookies": rule.target.cookies,
+                "basic_auth": rule.target.basic_auth,
+                "proxy": rule.target.proxy,
+                "js_render": rule.target.js_render,
+            }
             if existing is None:
                 target = Target(
                     id=rule.id,
@@ -231,12 +241,7 @@ class ScheduledRunner:
                     interval=rule.target.interval,
                     status=TargetStatus.NORMAL,
                     tags=list(rule.tags or []),
-                    metadata={
-                        "rule_name": rule.name,
-                        "headers": rule.target.headers,
-                        "routing_channels": rule.routing.channels,
-                        "cooldown": rule.routing.cooldown,
-                    },
+                    metadata=rule_meta,
                 )
                 self.repo.save_target(target)
                 synced_targets.append(target)
@@ -244,10 +249,11 @@ class ScheduledRunner:
                 existing.url = rule.target.url
                 existing.interval = rule.target.interval
                 existing.tags = list(rule.tags or [])
-                existing.metadata["rule_name"] = rule.name
-                existing.metadata["headers"] = rule.target.headers
-                existing.metadata["routing_channels"] = rule.routing.channels
-                existing.metadata["cooldown"] = rule.routing.cooldown
+                # Merge rule-defined metadata on top of existing runtime metadata
+                # so that fields like normalized_values / initialized survive sync.
+                merged_meta = dict(existing.metadata or {})
+                merged_meta.update(rule_meta)
+                existing.metadata = merged_meta
                 self.repo.save_target(existing)
                 synced_targets.append(existing)
 
@@ -289,6 +295,7 @@ class ScheduledRunner:
                 timeout=timeout,
                 noise_reduction_level=noise_reduction_level,
                 rule_status=rule_status,
+                rule=rule,
             )
 
     @staticmethod

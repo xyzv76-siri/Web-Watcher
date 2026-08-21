@@ -112,15 +112,62 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # notify history
+    notify_parser.add_argument(
+        "--history",
+        dest="notify_history",
+        action="store_true",
+        help="Show recent notification delivery history",
+    )
+    notify_parser.add_argument(
+        "--history-limit",
+        dest="notify_history_limit",
+        type=int,
+        default=20,
+        help="Maximum number of history records to show (default: 20)",
+    )
+    notify_parser.add_argument(
+        "--history-status",
+        dest="notify_history_status",
+        type=str,
+        default=None,
+        help="Filter history by status (pending/sent/failed/retry_pending)",
+    )
+    notify_parser.add_argument(
+        "--history-channel",
+        dest="notify_history_channel",
+        type=str,
+        default=None,
+        help="Filter history by channel (console/webhook/slack/lark/dingtalk)",
+    )
+
+    # notify retry
+    notify_parser.add_argument(
+        "--retry",
+        dest="notify_retry",
+        action="store_true",
+        help="Retry failed notifications",
+    )
+    notify_parser.add_argument(
+        "--retry-limit",
+        dest="notify_retry_limit",
+        type=int,
+        default=10,
+        help="Maximum number of failed notifications to retry (default: 10)",
+    )
+
+    # notify stats
+    notify_parser.add_argument(
+        "--stats",
+        dest="notify_stats",
+        action="store_true",
+        help="Show notification delivery statistics",
+    )
+
     # 3. run subcommand (pipeline execution)
     run_parser = subparsers.add_parser(
         "run",
         help="Execute monitoring pipeline cycle",
-    )
-    run_parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Execute a single pipeline cycle and exit",
     )
     run_parser.add_argument(
         "--interval",
@@ -381,6 +428,28 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--extractor", dest="inspect_extractor", default=None, help="Only inspect this extractor name")
     inspect_parser.add_argument("--verbose", action="store_true", help="Show full diff/evidence instead of truncating")
 
+    # inspect watch (Watch Mode)
+    inspect_parser.add_argument(
+        "--watch",
+        dest="inspect_watch",
+        action="store_true",
+        help="Continuously watch the URL and show changes in real-time",
+    )
+    inspect_parser.add_argument(
+        "--watch-interval",
+        dest="inspect_watch_interval",
+        type=float,
+        default=5.0,
+        help="Polling interval in seconds for watch mode (default: 5.0)",
+    )
+    inspect_parser.add_argument(
+        "--watch-max-iterations",
+        dest="inspect_watch_max_iterations",
+        type=int,
+        default=None,
+        help="Maximum number of watch iterations (default: unlimited)",
+    )
+
     # 9. template subcommand (Preset)
     template_parser = subparsers.add_parser(
         "template",
@@ -417,6 +486,71 @@ def build_parser() -> argparse.ArgumentParser:
     template_apply_parser.add_argument("--name", default=None, help="Rule name override")
     template_apply_parser.add_argument("--output", "-o", default=None, help="Output file path (default: stdout)")
 
+    # template save (user custom preset)
+    template_save_parser = template_subparsers.add_parser(
+        "save",
+        help="Save current rule as a user custom preset",
+    )
+    template_save_parser.add_argument("name", help="Preset name")
+    template_save_parser.add_argument("--description", default="", help="Preset description")
+    template_save_parser.add_argument("--yaml-file", required=True, help="Path to YAML rule file to save as preset")
+    template_save_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # template export (user preset -> YAML file)
+    template_export_parser = template_subparsers.add_parser(
+        "export",
+        help="Export a user preset to YAML file",
+    )
+    template_export_parser.add_argument("name", help="Preset name")
+    template_export_parser.add_argument("--output", "-o", required=True, help="Output YAML file path")
+    template_export_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # template import (YAML file -> user preset)
+    template_import_parser = template_subparsers.add_parser(
+        "import",
+        help="Import a YAML file as a user preset",
+    )
+    template_import_parser.add_argument("name", help="Preset name")
+    template_import_parser.add_argument("--yaml-file", required=True, help="Path to YAML rule file")
+    template_import_parser.add_argument("--description", default="", help="Preset description")
+    template_import_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # template delete (user preset)
+    template_delete_parser = template_subparsers.add_parser(
+        "delete",
+        help="Delete a user preset",
+    )
+    template_delete_parser.add_argument("name", help="Preset name")
+    template_delete_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     # 10. targets subcommand (Target Grouping / Tags)
     targets_parser = subparsers.add_parser(
         "targets",
@@ -443,6 +577,96 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Filter by tag (repeatable; OR semantics)",
+    )
+
+    # targets batch-enable
+    targets_batch_enable_parser = targets_subparsers.add_parser(
+        "batch-enable",
+        help="Batch enable targets by tag or group",
+    )
+    targets_batch_enable_parser.add_argument(
+        "--tag",
+        dest="batch_tags",
+        action="append",
+        default=None,
+        help="Enable targets with this tag (repeatable; OR semantics)",
+    )
+    targets_batch_enable_parser.add_argument(
+        "--group",
+        dest="batch_group",
+        default=None,
+        help="Enable targets in this group",
+    )
+
+    # targets batch-disable
+    targets_batch_disable_parser = targets_subparsers.add_parser(
+        "batch-disable",
+        help="Batch disable targets by tag or group",
+    )
+    targets_batch_disable_parser.add_argument(
+        "--tag",
+        dest="batch_tags",
+        action="append",
+        default=None,
+        help="Disable targets with this tag (repeatable; OR semantics)",
+    )
+    targets_batch_disable_parser.add_argument(
+        "--group",
+        dest="batch_group",
+        default=None,
+        help="Disable targets in this group",
+    )
+
+    # targets batch-delete
+    targets_batch_delete_parser = targets_subparsers.add_parser(
+        "batch-delete",
+        help="Batch delete targets by tag or group",
+    )
+    targets_batch_delete_parser.add_argument(
+        "--tag",
+        dest="batch_tags",
+        action="append",
+        default=None,
+        help="Delete targets with this tag (repeatable; OR semantics)",
+    )
+    targets_batch_delete_parser.add_argument(
+        "--group",
+        dest="batch_group",
+        default=None,
+        help="Delete targets in this group",
+    )
+
+    # targets batch-retag
+    targets_batch_retag_parser = targets_subparsers.add_parser(
+        "batch-retag",
+        help="Batch add/remove tags from targets by tag or group",
+    )
+    targets_batch_retag_parser.add_argument(
+        "--tag",
+        dest="batch_tags",
+        action="append",
+        default=None,
+        help="Targets with this tag (repeatable; OR semantics)",
+    )
+    targets_batch_retag_parser.add_argument(
+        "--group",
+        dest="batch_group",
+        default=None,
+        help="Targets in this group",
+    )
+    targets_batch_retag_parser.add_argument(
+        "--add-tag",
+        dest="add_tags",
+        action="append",
+        default=None,
+        help="Add this tag (repeatable)",
+    )
+    targets_batch_retag_parser.add_argument(
+        "--remove-tag",
+        dest="remove_tags",
+        action="append",
+        default=None,
+        help="Remove this tag (repeatable)",
     )
 
     # 11. reload subcommand (Hot Reload)
@@ -606,21 +830,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rules_disable_parser.add_argument("rule_id", help="Rule ID to disable")
 
-    # 11. notify history subcommand (Observability v1)
-    notify_parser.add_argument(
-        "--history",
-        dest="notify_history",
-        action="store_true",
-        help="Show recent notification delivery history",
-    )
-    notify_parser.add_argument(
-        "--history-limit",
-        dest="notify_history_limit",
-        type=int,
-        default=20,
-        help="Maximum number of history records to show (default: 20)",
-    )
-
     return parser
 
 
@@ -673,27 +882,81 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
     run_once = getattr(args, "once", False)
     show_history = getattr(args, "notify_history", False)
     history_limit = getattr(args, "notify_history_limit", 20)
+    history_status = getattr(args, "notify_history_status", None)
+    history_channel = getattr(args, "notify_history_channel", None)
+    do_retry = getattr(args, "notify_retry", False)
+    retry_limit = getattr(args, "notify_retry_limit", 10)
+    show_stats = getattr(args, "notify_stats", False)
 
+    repo = Repository(db_path)
+
+    # Handle history with filters
     if show_history:
-        repo = Repository(db_path)
-        cursor = repo.connection.execute(
-            "SELECT id, event_id, channel, status, created_at, sent_at, payload FROM notifications ORDER BY created_at DESC LIMIT ?",
-            (history_limit,),
+        notifications = repo.list_notifications(
+            status=history_status,
+            channel=history_channel,
+            limit=history_limit,
         )
-        rows = cursor.fetchall()
-        if not rows:
+        if not notifications:
             print("No notification history found.")
             return 0
 
         print(f"{'ID':<6} {'Event':<8} {'Channel':<12} {'Status':<14} {'Created At':<26} {'Sent At'}")
         print("-" * 90)
-        for row in rows:
-            nid, event_id, channel, status, created_at, sent_at, payload = row
-            sent_str = sent_at if sent_at else "-"
-            print(f"{nid:<6} {event_id:<8} {channel:<12} {status:<14} {created_at:<26} {sent_str}")
+        for n in notifications:
+            sent_str = n.sent_at.isoformat() if n.sent_at else "-"
+            print(f"{n.id:<6} {n.event_id:<8} {n.channel:<12} {n.status:<14} {n.created_at.isoformat():<26} {sent_str}")
         return 0
 
-    repo = Repository(db_path)
+    # Handle retry
+    if do_retry:
+        pending = repo.list_notifications(status="failed", limit=retry_limit)
+        if not pending:
+            print("No failed notifications to retry.")
+            return 0
+
+        dispatcher = _build_dispatcher(repo, webhook_url, config)
+        retry_count = 0
+        for n in pending:
+            try:
+                # Re-queue by resetting status to pending
+                repo.connection.execute(
+                    "UPDATE notifications SET status = 'pending', dispatch_until = NULL, dispatch_token = NULL WHERE id = ?",
+                    (n.id,),
+                )
+                repo.connection.commit()
+                retry_count += 1
+            except Exception as e:
+                print(f"Failed to retry notification {n.id}: {e}")
+
+        print(f"Retried {retry_count} notification(s). Run 'notify --once' to dispatch them.")
+        return 0
+
+    # Handle stats
+    if show_stats:
+        cursor = repo.connection.execute("""
+            SELECT status, channel, COUNT(*) as cnt, 
+                   MIN(created_at) as first_seen, 
+                   MAX(created_at) as last_seen,
+                   SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent_count
+            FROM notifications 
+            GROUP BY status, channel 
+            ORDER BY status, channel
+        """)
+        rows = cursor.fetchall()
+
+        if not rows:
+            print("No notification statistics available.")
+            return 0
+
+        print(f"{'Status':<14} {'Channel':<12} {'Count':<8} {'Sent':<8} {'First Seen':<26} {'Last Seen'}")
+        print("-" * 90)
+        for row in rows:
+            status, channel, cnt, first_seen, last_seen, sent_count = row
+            print(f"{status:<14} {channel:<12} {cnt:<8} {sent_count:<8} {first_seen:<26} {last_seen}")
+        return 0
+
+    # Default: run dispatcher
     dispatcher = _build_dispatcher(repo, webhook_url, config)
 
     if run_once:
@@ -1119,17 +1382,112 @@ def handle_inspect(args: argparse.Namespace) -> int:
             print(f"  scope_merged_count: {evidence.get('scope_merged_count')}")
         print()
 
+    # Watch mode: continuous monitoring
+    watch_mode = getattr(args, "inspect_watch", False)
+    if watch_mode:
+        watch_interval = getattr(args, "inspect_watch_interval", 5.0)
+        max_iterations = getattr(args, "inspect_watch_max_iterations", None)
+        iteration = 0
+
+        print(f"=== Watch Mode: {rule.id} ({rule.name}) ===")
+        print(f"Interval: {watch_interval}s")
+        if max_iterations:
+            print(f"Max iterations: {max_iterations}")
+        print("Press Ctrl+C to stop.\n")
+
+        import time as time_mod
+        previous_values = dict(result.observation.normalized_values) if result.observation.normalized_values else {}
+
+        try:
+            while True:
+                iteration += 1
+                if max_iterations and iteration > max_iterations:
+                    print(f"\nReached max iterations ({max_iterations}). Stopping.")
+                    break
+
+                print(f"[{datetime.now().isoformat()}] Iteration {iteration}")
+
+                # Fetch fresh content
+                if args.url:
+                    req = urllib.request.Request(args.url, headers=rule.target.headers or {"User-Agent": "WebWatcher/1.0"})
+                    with urllib.request.urlopen(req, timeout=rule.target.timeout) as resp:
+                        html_content = resp.read().decode("utf-8", errors="ignore")
+                elif args.html_file:
+                    html_content = Path(args.html_file).read_text(encoding="utf-8")
+                else:
+                    print("[ERROR] Provide either --url or --html-file.")
+                    return 1
+
+                fetch_result = FetchResult(
+                    target_key=rule.id,
+                    status=FetchStatus.SUCCESS,
+                    status_code=200,
+                    fetched_at=datetime.utcnow(),
+                    content=html_content,
+                    etag=None,
+                    last_modified=None,
+                )
+                mock_fetcher.fetch.return_value = fetch_result
+
+                result = adapter.execute(fetcher=mock_fetcher, now=datetime.utcnow())
+
+                # Show changes
+                changed = False
+                for name, extracted in result.observation.extracted_results.items():
+                    new_val = result.observation.normalized_values.get(name)
+                    old_val = previous_values.get(name)
+
+                    if old_val != new_val:
+                        changed = True
+                        print(f"  [{name}] CHANGED")
+                        print(f"    before: {_truncate(old_val, 200)}")
+                        print(f"    after:  {_truncate(new_val, 200)}")
+
+                        diff = result.observation.diffs.get(name)
+                        if diff:
+                            print(f"    diff_summary: {diff.summary}")
+
+                if not changed:
+                    print("  No changes detected.")
+
+                print()
+
+                previous_values = dict(result.observation.normalized_values) if result.observation.normalized_values else {}
+
+                time_mod.sleep(watch_interval)
+        except KeyboardInterrupt:
+            print("\nWatch mode stopped by user.")
+        return 0
+
     return 0
 
 
 def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    repo = Repository(db_path)
+
     if args.template_command == "list":
-        print("Available presets:\n")
+        print("Built-in presets:\n")
         for preset in list_presets():
             print(f"  {preset.name:20s} {preset.description}")
+
+        user_presets = repo.list_user_presets()
+        if user_presets:
+            print("\nUser presets:\n")
+            for p in user_presets:
+                print(f"  {p['name']:20s} {p['description']}")
         return 0
 
     if args.template_command == "show":
+        # Try user preset first, then built-in
+        user_preset = repo.get_user_preset(args.preset)
+        if user_preset:
+            print(f"User Preset: {user_preset['name']}")
+            print(f"Description: {user_preset['description']}\n")
+            print("YAML Content:")
+            print(user_preset['yaml_content'])
+            return 0
+
         try:
             preset = get_preset(args.preset)
         except KeyError as e:
@@ -1201,7 +1559,42 @@ def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
             print(yaml_content)
         return 0
 
-    print("[ERROR] Unknown template command. Use: list, show, apply")
+    if args.template_command == "save":
+        yaml_content = Path(args.yaml_file).read_text(encoding="utf-8")
+        if repo.save_user_preset(args.name, yaml_content, args.description):
+            print(f"[OK] Preset '{args.name}' saved.")
+            return 0
+        else:
+            print(f"[ERROR] Failed to save preset '{args.name}'.")
+            return 1
+
+    if args.template_command == "export":
+        preset = repo.get_user_preset(args.name)
+        if not preset:
+            print(f"[ERROR] User preset not found: {args.name}")
+            return 1
+        Path(args.output).write_text(preset["yaml_content"], encoding="utf-8")
+        print(f"[OK] Preset '{args.name}' exported to {args.output}")
+        return 0
+
+    if args.template_command == "import":
+        yaml_content = Path(args.yaml_file).read_text(encoding="utf-8")
+        if repo.save_user_preset(args.name, yaml_content, args.description):
+            print(f"[OK] Preset '{args.name}' imported.")
+            return 0
+        else:
+            print(f"[ERROR] Failed to import preset '{args.name}'.")
+            return 1
+
+    if args.template_command == "delete":
+        if repo.delete_user_preset(args.name):
+            print(f"[OK] Preset '{args.name}' deleted.")
+            return 0
+        else:
+            print(f"[ERROR] User preset not found: {args.name}")
+            return 1
+
+    print("[ERROR] Unknown template command. Use: list, show, apply, save, export, import, delete")
     return 1
 
 
@@ -1459,7 +1852,65 @@ def handle_targets(args: argparse.Namespace, config: AppConfig) -> int:
             print(f"{t.id:<20} {t.url:<50} {t.status.value:<12} {tags_str}")
         return 0
 
-    print("[ERROR] Unknown targets command. Use: list")
+    if command in ("batch-enable", "batch-disable", "batch-delete", "batch-retag"):
+        batch_tags = getattr(args, "batch_tags", None) or []
+        batch_group = getattr(args, "batch_group", None)
+
+        # Get targets matching criteria
+        targets = repo.list_targets(tags=batch_tags if batch_tags else None, require_all=False)
+        if batch_group:
+            # Filter by group from metadata
+            targets = [t for t in targets if (t.metadata or {}).get("group") == batch_group]
+
+        if not targets:
+            print("No targets match the specified criteria.")
+            return 0
+
+        print(f"Found {len(targets)} target(s) matching criteria.")
+
+        if command == "batch-enable":
+            for t in targets:
+                t.status = TargetStatus.NORMAL
+                repo.save_target(t)
+            print(f"[OK] Enabled {len(targets)} target(s).")
+            return 0
+
+        if command == "batch-disable":
+            for t in targets:
+                t.status = TargetStatus.DISABLED
+                repo.save_target(t)
+            print(f"[OK] Disabled {len(targets)} target(s).")
+            return 0
+
+        if command == "batch-delete":
+            for t in targets:
+                repo.delete_target(t.id)
+            print(f"[OK] Deleted {len(targets)} target(s).")
+            return 0
+
+        if command == "batch-retag":
+            add_tags = getattr(args, "add_tags", None) or []
+            remove_tags = getattr(args, "remove_tags", None) or []
+
+            if not add_tags and not remove_tags:
+                print("[ERROR] Must specify --add-tag or --remove-tag.")
+                return 1
+
+            updated = 0
+            for t in targets:
+                current_tags = set(t.tags or [])
+                if add_tags:
+                    current_tags.update(add_tags)
+                if remove_tags:
+                    current_tags.difference_update(remove_tags)
+                t.tags = list(current_tags)
+                repo.save_target(t)
+                updated += 1
+
+            print(f"[OK] Updated tags for {updated} target(s).")
+            return 0
+
+    print("[ERROR] Unknown targets command. Use: list, batch-enable, batch-disable, batch-delete, batch-retag")
     return 1
 
 
