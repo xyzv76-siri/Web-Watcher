@@ -3,7 +3,7 @@ import logging
 import socket
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 from web_watcher.repository import Repository
 from web_watcher.models import Target, TargetStatus
@@ -64,6 +64,8 @@ class ScheduledRunner:
             host_limiter = HostRateLimiter(repository=repo)
         self.policy = policy or FetchPolicy(host_rate_limiter=host_limiter)
         self._rule_cache: Dict[str, WatcherRule] = {}
+        self._last_rules_mtime: Optional[float] = None
+        self._last_rules_hash: Optional[str] = None
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.metrics = metrics
         self.include_tags = include_tags or []
@@ -76,6 +78,125 @@ class ScheduledRunner:
             self.metrics.increment(name, tags=tags, amount=amount)
         except Exception:
             pass
+
+    def _get_rules_snapshot(self, path: Optional[Union[str, Path]] = None) -> Tuple[Optional[float], Optional[str]]:
+        """Get mtime and hash of rules file for change detection."""
+        p = Path(path or self.rules_path)
+        if not p.exists():
+            return None, None
+        try:
+            mtime = p.stat().st_mtime
+            content = p.read_bytes()
+            import hashlib
+            file_hash = hashlib.sha256(content).hexdigest()
+            return mtime, file_hash
+        except Exception:
+            return None, None
+
+    def _check_rules_changed(self, path: Optional[Union[str, Path]] = None) -> bool:
+        """Check if rules file has changed since last sync."""
+        if not self.rules_path:
+            return False
+        mtime, file_hash = self._get_rules_snapshot(path)
+        if mtime is None or file_hash is None:
+            return False
+        if self._last_rules_mtime is None or self._last_rules_hash is None:
+            return True
+        return mtime != self._last_rules_mtime or file_hash != self._last_rules_hash
+
+    def reload_rules(self, path: Optional[Union[str, Path]] = None, include_tags: Optional[List[str]] = None, exclude_tags: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Reload rules from YAML file with optional tag filtering.
+        
+        Returns dict with reload stats.
+        """
+        start_time = datetime.now(timezone.utc)
+        path = path or self.rules_path
+        if not path:
+            return {"reloaded": 0, "filtered": 0, "skipped": 0}
+
+        p = Path(path)
+        if not p.exists():
+            logger.warning(f"Rules file not found during reload: {p}")
+            return {"reloaded": 0, "filtered": 0, "skipped": 0, "error": "file_not_found"}
+
+        # Parse new ruleset
+        try:
+            ruleset = RuleParser.parse_file(p)
+        except Exception as e:
+            logger.error(f"Failed to parse rules file during reload: {e}")
+            return {"reloaded": 0, "filtered": 0, "skipped": 0, "error": str(e)}
+
+        # Apply tag filtering if specified
+        include_tags = include_tags or []
+        exclude_tags = exclude_tags or []
+        filtered_rules = []
+        filtered_count = 0
+        
+        for rule in ruleset.rules:
+            rule_tags = set(getattr(rule, "tags", None) or [])
+            
+            # exclude 优先
+            if exclude_tags and rule_tags & set(exclude_tags):
+                filtered_count += 1
+                continue
+            
+            # include 检查
+            if include_tags and not (rule_tags & set(include_tags)):
+                filtered_count += 1
+                continue
+            
+            filtered_rules.append(rule)
+
+        # Update rule cache
+        old_cache_size = len(self._rule_cache)
+        self._rule_cache = {rule.id: rule for rule in filtered_rules}
+        new_cache_size = len(self._rule_cache)
+
+        # Sync targets to repo if available
+        synced_targets = []
+        if self.repo:
+            for rule in filtered_rules:
+                existing = self.repo.get_target(rule.id)
+                if existing is None:
+                    target = Target(
+                        id=rule.id,
+                        url=rule.target.url,
+                        interval=rule.target.interval,
+                        status=TargetStatus.NORMAL,
+                        tags=list(rule.tags or []),
+                        metadata={
+                            "rule_name": rule.name,
+                            "headers": rule.target.headers,
+                            "routing_channels": rule.routing.channels,
+                            "cooldown": rule.routing.cooldown,
+                        },
+                    )
+                    self.repo.save_target(target)
+                    synced_targets.append(target)
+                else:
+                    existing.url = rule.target.url
+                    existing.interval = rule.target.interval
+                    existing.tags = list(rule.tags or [])
+                    existing.metadata["rule_name"] = rule.name
+                    existing.metadata["headers"] = rule.target.headers
+                    existing.metadata["routing_channels"] = rule.routing.channels
+                    existing.metadata["cooldown"] = rule.routing.cooldown
+                    self.repo.save_target(existing)
+                    synced_targets.append(existing)
+
+        # Update snapshot
+        mtime, file_hash = self._get_rules_snapshot(path)
+        self._last_rules_mtime = mtime
+        self._last_rules_hash = file_hash
+
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        return {
+            "reloaded": new_cache_size,
+            "filtered": filtered_count,
+            "skipped": old_cache_size - new_cache_size + filtered_count,
+            "synced_targets": len(synced_targets),
+            "elapsed_seconds": round(elapsed, 3),
+        }
 
     def sync_rules(self, rules_path: Optional[Union[str, Path]] = None) -> List[Target]:
         path = rules_path or self.rules_path
@@ -122,6 +243,11 @@ class ScheduledRunner:
                 existing.metadata["cooldown"] = rule.routing.cooldown
                 self.repo.save_target(existing)
                 synced_targets.append(existing)
+
+        # Update snapshot after successful sync
+        mtime, file_hash = self._get_rules_snapshot(path)
+        self._last_rules_mtime = mtime
+        self._last_rules_hash = file_hash
 
         return synced_targets
 
@@ -302,6 +428,22 @@ class ScheduledRunner:
     ) -> Dict[str, Any]:
         now = now or datetime.now(timezone.utc)
 
+        # 1. Hot reload if rules file changed
+        reload_stats = None
+        if self.rules_path and self._check_rules_changed():
+            logger.info(f"Rules file changed, triggering hot reload: {self.rules_path}")
+            reload_stats = self.reload_rules()
+            if reload_stats.get("error"):
+                logger.warning(f"Hot reload encountered error: {reload_stats['error']}")
+            else:
+                logger.info(
+                    f"Hot reload completed: {reload_stats.get('reloaded', 0)} rules loaded, "
+                    f"{reload_stats.get('filtered', 0)} filtered, "
+                    f"{reload_stats.get('skipped', 0)} skipped, "
+                    f"{reload_stats.get('synced_targets', 0)} targets synced "
+                    f"in {reload_stats.get('elapsed_seconds', 0)}s"
+                )
+
         # 1. 自动同步 YAML 规则
         if self.rules_path:
             self.sync_rules(self.rules_path)
@@ -362,6 +504,7 @@ class ScheduledRunner:
             "skipped_count": 0,
             "errors": [],
             "rules_filtered": rules_filtered,
+            "reload": reload_stats,
         }
         import logging
         logging.warning(f"[DEBUG] claimed count={len(claimed)}, ids={[c.id for c in claimed]}, rules_filtered={rules_filtered}")

@@ -445,6 +445,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Filter by tag (repeatable; OR semantics)",
     )
 
+    # 11. reload subcommand (Hot Reload)
+    reload_parser = subparsers.add_parser(
+        "reload",
+        help="Hot reload rules from YAML file",
+    )
+    reload_parser.add_argument(
+        "--rules",
+        dest="reload_rules_path",
+        type=str,
+        default=None,
+        help="Path to YAML rules file (default: WEB_WATCHER_RULES or config/rules.yaml)",
+    )
+    reload_parser.add_argument(
+        "--include-tag",
+        dest="reload_include_tags",
+        action="append",
+        default=None,
+        help="Only reload rules with this tag (repeatable)",
+    )
+    reload_parser.add_argument(
+        "--exclude-tag",
+        dest="reload_exclude_tags",
+        action="append",
+        default=None,
+        help="Exclude rules with this tag from reload (repeatable)",
+    )
+    reload_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     # 11. rules subcommand (Observability v1)
     rules_parser = subparsers.add_parser(
         "rules",
@@ -618,6 +653,11 @@ def handle_run(args: argparse.Namespace, config: AppConfig) -> int:
         rules_filtered = summary.get("rules_filtered", 0)
         if rules_filtered:
             print(f"Filtered {rules_filtered} rules by tags")
+        reload_info = summary.get("reload")
+        if reload_info and not reload_info.get("error"):
+            print(f"Reloaded {reload_info.get('reloaded', 0)} rules ({reload_info.get('elapsed_seconds', 0)}s)")
+        elif reload_info and reload_info.get("error"):
+            print(f"Reload error: {reload_info['error']}")
         print(f"Pipeline run completed: {summary.get('targets_evaluated', 0)} targets evaluated")
         return 0
     
@@ -664,7 +704,12 @@ def handle_daemon(args: argparse.Namespace, config: AppConfig) -> int:
     print("Press Ctrl+C to stop.")
     try:
         while True:
-            runner.run_once()
+            summary = runner.run_once()
+            reload_info = summary.get("reload")
+            if reload_info and not reload_info.get("error"):
+                print(f"[reload] {reload_info.get('reloaded', 0)} rules reloaded ({reload_info.get('elapsed_seconds', 0)}s)")
+            elif reload_info and reload_info.get("error"):
+                print(f"[reload] error: {reload_info['error']}")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nDaemon stopped by user.")
@@ -1075,6 +1120,49 @@ def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
     return 1
 
 
+def handle_reload(args: argparse.Namespace, config: AppConfig) -> int:
+    db_path = getattr(args, "db_path", config.db_path)
+    rules_path = getattr(args, "reload_rules_path", None) or os.getenv("WEB_WATCHER_RULES") or getattr(config, "rules_path", None) or "config/rules.yaml"
+    include_tags = getattr(args, "reload_include_tags", None) or []
+    exclude_tags = getattr(args, "reload_exclude_tags", None) or []
+
+    repo = Repository(db_path)
+    from .scheduled_runner import ScheduledRunner
+    runner = ScheduledRunner(
+        repo=repo,
+        config=config,
+        rules_path=rules_path,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+    )
+
+    # Check if rules file changed first
+    changed = runner._check_rules_changed()
+    if not changed:
+        print(f"Rules file unchanged: {rules_path}")
+        return 0
+
+    print(f"Reloading rules from: {rules_path}")
+    stats = runner.reload_rules(
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+    )
+
+    if stats.get("error"):
+        print(f"[ERROR] Reload failed: {stats['error']}")
+        return 1
+
+    print(f"[OK] Reloaded {stats.get('reloaded', 0)} rules")
+    if stats.get("filtered"):
+        print(f"    Filtered: {stats['filtered']}")
+    if stats.get("skipped"):
+        print(f"    Skipped: {stats['skipped']}")
+    if stats.get("synced_targets"):
+        print(f"    Synced targets: {stats['synced_targets']}")
+    print(f"    Elapsed: {stats.get('elapsed_seconds', 0)}s")
+    return 0
+
+
 def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
     rules_path = getattr(args, "rules_path", None) or os.getenv("WEB_WATCHER_RULES") or "config/rules.yaml"
     path = Path(rules_path)
@@ -1276,6 +1364,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_rules(args, config)
     if args.command == "targets":
         return handle_targets(args, config)
+    if args.command == "reload":
+        return handle_reload(args, config)
 
     parser.print_help()
     return 0
