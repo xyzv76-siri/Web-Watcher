@@ -294,6 +294,11 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **GitHub Subresource Isolation v1** — `GitHubTarget` 支持 `watch_types`（releases/stars/tags）子资源状态隔离。
 - **Ground Truth** — 全量测试 **1518 passed**；12 项运行时行为验证全部通过。
 
+### v1.0.4 — 2026-08-21
+
+- **Digest v1** — 新增 `digest` CLI 子命令，支持 `daily` / `weekly` 预设及自定义 `--since` / `--until` 时间窗口；按 target 汇总事件并生成 Markdown 报告；支持 `--channel console` 直接输出或通过 `webhook` / `email` 渠道派发；`--min-importance` 可过滤只汇总重要以上事件。
+- **Ground Truth** — 全量测试 **1525 passed**（含 7 个新增 digest 测试）。
+
 ### v1.0.3 — 2026-08-21
 
 - **Signal Contract 统一** — `GitHubTarget`、`GenericWebTarget`、`RSSFeedTarget` 的 Signal 构造统一为 `value=` + `observed_at=`，移除已弃用的 `payload=` / `created_at=`；异常处理收紧为 `TypeError/ValueError`，避免裸 `except Exception` 吞错。

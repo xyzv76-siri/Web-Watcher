@@ -767,6 +767,109 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to SQLite database file (default: web_watcher.db)",
     )
 
+    # 13. digest subcommand (Digest v1)
+    digest_parser = subparsers.add_parser(
+        "digest",
+        help="Generate a non-realtime digest/report of recent events",
+    )
+    digest_parser.add_argument(
+        "preset",
+        nargs="?",
+        choices=["daily", "weekly"],
+        default=None,
+        help="Preset time window: daily (last 24h) or weekly (last 7d)",
+    )
+    digest_parser.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help="Start of time window (ISO timestamp, e.g. 2026-08-20T00:00:00Z)",
+    )
+    digest_parser.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        help="End of time window (ISO timestamp, default: now)",
+    )
+    digest_parser.add_argument(
+        "--min-importance",
+        dest="digest_min_importance",
+        default="interesting",
+        choices=["ignore", "interesting", "important", "critical"],
+        help="Minimum importance level to include (default: interesting)",
+    )
+    digest_parser.add_argument(
+        "--channel",
+        dest="digest_channel",
+        default="console",
+        choices=["console", "webhook", "email", "slack", "lark", "dingtalk"],
+        help="Delivery channel for the digest (default: console)",
+    )
+    digest_parser.add_argument(
+        "--webhook-url",
+        dest="digest_webhook_url",
+        default=None,
+        help="Webhook URL (for webhook channel)",
+    )
+    digest_parser.add_argument(
+        "--smtp-host",
+        dest="digest_smtp_host",
+        default=None,
+        help="SMTP host (for email channel)",
+    )
+    digest_parser.add_argument(
+        "--smtp-port",
+        dest="digest_smtp_port",
+        type=int,
+        default=25,
+        help="SMTP port (default: 25)",
+    )
+    digest_parser.add_argument(
+        "--smtp-user",
+        dest="digest_smtp_user",
+        default=None,
+        help="SMTP username (for email channel)",
+    )
+    digest_parser.add_argument(
+        "--smtp-password",
+        dest="digest_smtp_password",
+        default=None,
+        help="[DEPRECATED] SMTP password (for email channel). Prefer WEB_WATCHER_SMTP_PASSWORD env var.",
+    )
+    digest_parser.add_argument(
+        "--smtp-use-tls",
+        dest="digest_smtp_use_tls",
+        action="store_true",
+        help="Enable STARTTLS for SMTP",
+    )
+    digest_parser.add_argument(
+        "--smtp-use-ssl",
+        dest="digest_smtp_use_ssl",
+        action="store_true",
+        help="Enable SSL/TLS for SMTP",
+    )
+    digest_parser.add_argument(
+        "--email-from",
+        dest="digest_email_from",
+        default=None,
+        help="From address for email channel",
+    )
+    digest_parser.add_argument(
+        "--email-to",
+        dest="digest_email_to",
+        nargs="+",
+        default=None,
+        help="Recipient address(es) for email channel",
+    )
+    digest_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
     # 12. registry subcommand (Rule Registry v1)
     registry_parser = subparsers.add_parser(
         "registry",
@@ -1066,6 +1169,95 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
     except KeyboardInterrupt:
         dispatcher.stop()
         print("\nDispatcher stopped by user.")
+    return 0
+
+
+def handle_digest(args: argparse.Namespace, config: AppConfig) -> int:
+    from datetime import datetime, timezone, timedelta
+    from .digest import DigestBuilder
+    from .importance import Importance
+
+    db_path = getattr(args, "db_path", config.db_path)
+    preset = getattr(args, "preset", None)
+    since_str = getattr(args, "since", None)
+    until_str = getattr(args, "until", None)
+    min_importance_str = getattr(args, "digest_min_importance", "interesting")
+    channel = getattr(args, "digest_channel", "console")
+
+    # 解析时间窗口
+    now = datetime.now(timezone.utc)
+    if since_str:
+        since = datetime.fromisoformat(since_str)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+    else:
+        if preset == "weekly":
+            since = now - timedelta(days=7)
+        else:
+            since = now - timedelta(days=1)
+    if until_str:
+        until = datetime.fromisoformat(until_str)
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+    else:
+        until = now
+
+    min_importance = Importance.from_value(min_importance_str)
+
+    repo = Repository(db_path)
+    builder = DigestBuilder(repo)
+    report = builder.build(since=since, until=until, min_importance=min_importance)
+
+    md = report.to_markdown()
+    if channel == "console":
+        print(md)
+        return 0
+
+    # 非 console 渠道：复用现有 sender
+    sender = None
+    if channel == "webhook":
+        url = getattr(args, "digest_webhook_url", None)
+        if not url:
+            print("Error: --webhook-url is required for webhook channel", file=sys.stderr)
+            return 2
+        from .channel_senders import WebhookSender
+        sender = WebhookSender(webhook_url=url)
+
+    elif channel == "email":
+        smtp_host = getattr(args, "digest_smtp_host", None)
+        if not smtp_host:
+            print("Error: --smtp-host is required for email channel", file=sys.stderr)
+            return 2
+        smtp_password = getattr(args, "digest_smtp_password", None)
+        if smtp_password is not None:
+            import warnings
+            warnings.warn(
+                "--smtp-password is deprecated and will be removed in a future major version. "
+                "Use the WEB_WATCHER_SMTP_PASSWORD environment variable instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
+            import os
+            smtp_password = os.getenv("WEB_WATCHER_SMTP_PASSWORD")
+        from .channel_senders import EmailSender
+        sender = EmailSender(
+            smtp_host=smtp_host,
+            smtp_port=getattr(args, "digest_smtp_port", 25),
+            smtp_user=getattr(args, "digest_smtp_user", None),
+            smtp_password=smtp_password,
+            use_tls=getattr(args, "digest_smtp_use_tls", False),
+            use_ssl=getattr(args, "digest_smtp_use_ssl", False),
+            from_addr=getattr(args, "digest_email_from", None),
+            to_addrs=getattr(args, "digest_email_to", None) or [],
+        )
+    elif channel in ("slack", "lark", "dingtalk"):
+        print(f"Error: channel '{channel}' is not yet supported in digest v1", file=sys.stderr)
+        return 2
+
+    if sender is not None:
+        sender.send(md)
+        print(f"Digest sent via {channel}.")
     return 0
 
 
@@ -2137,6 +2329,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_notify(args, config)
     if args.command == "cross-target":
         return handle_cross_target(args, config)
+    if args.command == "digest":
+        return handle_digest(args, config)
     if args.command == "run":
         return handle_run(args, config)
     if args.command == "daemon":
