@@ -200,6 +200,7 @@ python -m web_watcher.cli daemon --exclude-tags test --include-tags critical
 * Slack (Block Kit)
 * Lark
 * DingTalk
+* Email (SMTP)
 
 ## 部署
 
@@ -286,9 +287,9 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **Debug / Inspection Mode v1** — 新增 `inspect` CLI 子命令，支持 `--rule` + `--url`/`--html-file`，输出完整 pipeline 链路（fetch → extract → scope → normalize → diff → observation）。
 - **Hot Reload v1** — `reload` 子命令支持 `--include-tag` / `--exclude-tag` 过滤；`run --once` 自动检测 rules.yaml 变更并热重载。
 - **Rule Registry v1** — 运行时规则启用/禁用/优先级/分组管理，不修改 YAML；`registry` CLI 子命令支持 list/show/enable/disable。
-- **Preset Ecosystem v1** — 内置 8 个监控模板（`github_release`、`blog_post`、`price`、`product_page`、`news_article`、`status_page`、`changelog` 等），`template apply` 可直接生成 `rules.yaml`。
+- **Preset Ecosystem v1** — 内置 9 个监控模板（`github_release`、`blog_post`、`price`、`product_page`、`news_article`、`status_page`、`changelog` 等），`template apply` 可直接生成 `rules.yaml`。
 - **Target Batch Operations v1** — `targets delete` 支持按标签批量删除，OR 语义；`targets list` 支持 `--tag` / `--require-all-tags` 过滤。
 - **Retention / Export Filters v1** — `RetentionManager.enforce()` 支持按 `entity_id`、`event_type`、`importance`、`status`、`channel` 选择性清理；dry-run 零副作用。
 - **Notification Retry & Stats v1** — `notify --stats` 输出按状态/渠道聚合的投递统计；`notify --retry` 重试失败通知。
 - **GitHub Subresource Isolation v1** — `GitHubTarget` 支持 `watch_types`（releases/stars/tags）子资源状态隔离。
-- **Ground Truth** — 全量测试 **1478 passed**；12 项运行时行为验证全部通过。
+- **Ground Truth** — 全量测试 **1508 passed**；12 项运行时行为验证全部通过。

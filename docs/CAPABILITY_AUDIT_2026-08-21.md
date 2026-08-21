@@ -91,10 +91,10 @@
 ## 四、当前工作区状态
 
 - 分支 `master` 与 `origin/master` 同步
-- 最新提交：`91c9b91` (release: v1.0.2)
+- 最新提交：`a8fa6a1` (feat: Cross-Target 6 Part fix)
 - 最新 tag：`web-watcher-1.0.2`
 - 测试：1508 passed
-- 未跟踪文件：`docs/CAPABILITY_AUDIT_2026-08-21.md`（本文件）
+- 已提交：`docs/CAPABILITY_AUDIT_2026-08-21.md`
 - 已归档设计文档：`docs/archive/`（6 份）
 
 ---
