@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: forbid-duplicate-classes
+        name: Forbid duplicate class definitions
+        entry: python scripts/check_duplicate_classes.py
+        language: python
+        types: [python]
+        pass_filenames: ['.pre-commit-config.yaml']
+        always_run: true

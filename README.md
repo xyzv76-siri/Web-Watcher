@@ -28,11 +28,12 @@ Target
 * **变更检测** — 内容指纹、ETag/Last-Modified 条件请求与差异评估。
 * **持久化状态** — 基于 SQLite 的调度、信号、事件、调查与通知存储。
 * **调查与证据** — 符合条件的事件会触发调查；结果和证据会被持久化以供审计。
-* **通知** — 至少一次投递，支持 Console、Webhook、Slack、Lark 和 DingTalk。
+* **通知** — 至少一次投递，支持 Console、Webhook、Slack、Lark、DingTalk、Email (SMTP)、Telegram (Bot API)、Discord (Webhook)；支持 digest 日报/周报汇总。
 * **恢复能力** — 防崩溃状态持久化，自动 schema 初始化与过期声明清理。
 * **多 Worker 安全** — 通过 SQLite 锁串行化目标声明；重复声明会被拒绝。
 * **Docker 部署** — 非 root 用户镜像，挂载 `/data` 和 `/logs` 卷。
 * **监控模板（Preset）** — 内置 `github_release`、`blog_post`、`price`、`product_page`、`news_article`、`status_page`、`changelog` 等预设，可直接生成符合现有规则 schema 的 `rules.yaml`。
+* **本地监控台** — `webui` CLI 子命令启动轻量本地监控台，默认仅本机可访问，提供仪表盘、目标列表、事件详情与统计 API。
 
 ## 架构
 
@@ -296,23 +297,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **GitHub Subresource Isolation v1** — `GitHubTarget` 支持 `watch_types`（releases/stars/tags）子资源状态隔离。
 - **Ground Truth** — 全量测试 **1518 passed**；12 项运行时行为验证全部通过。
 
-### v1.0.4 — 2026-08-21
-
-- **Digest v1** — 新增 `digest` CLI 子命令，支持 `daily` / `weekly` 预设及自定义 `--since` / `--until` 时间窗口；按 target 汇总事件并生成 Markdown 报告；支持 `--channel console` 直接输出或通过 `webhook` / `email` 渠道派发；`--min-importance` 可过滤只汇总重要以上事件。
-- **Ground Truth** — 全量测试 **1531 passed**。
-
-### v1.0.6 — 2026-08-21
-
-- **Web UI v1** — 新增 `webui` CLI 子命令，启动轻量本地监控台（默认 `127.0.0.1:8080`）；基于 Python 标准库 `http.server`，零外部依赖；页面包括仪表盘 `/`、目标列表 `/targets`、事件详情 `/events/<id>`；JSON API 包括 `/api/targets`、`/api/events`（分页/过滤）、`/api/events/<id>`（含 signals）、`/api/stats`。
-- **Ground Truth** — 全量测试 **1540 passed**（含 9 个新增 Web UI 测试）。
-
-### v1.0.5 — 2026-08-21
-
-- **Telegram / Discord 原生通知** — 新增 `TelegramSender`（Bot API `sendMessage`）与 `DiscordSender`（Webhook Embed）；`notify` 与 `digest` 均支持 `--telegram-bot-token` / `--telegram-chat-id` 与 `--channel discord`；Discord embed 描述自动截断至 4000 字符。
-- **通知渠道** — 内置渠道扩展为 Console / Webhook / Slack / Lark / DingTalk / Email / Telegram / Discord。
-- **Ground Truth** — 全量测试 **1531 passed**（含 6 个新增 Telegram/Discord 测试）。
-
-### v1.0.4 — 2026-08-21
+### v1.0.3 — 2026-08-21
 
 - **Signal Contract 统一** — `GitHubTarget`、`GenericWebTarget`、`RSSFeedTarget` 的 Signal 构造统一为 `value=` + `observed_at=`，移除已弃用的 `payload=` / `created_at=`；异常处理收紧为 `TypeError/ValueError`，避免裸 `except Exception` 吞错。
 - **Signal 归一化增强** — `scheduled_runner._normalize_signal` 增加 `observed_at` / `signal_type` / `value` 的兜底解析，dict-based payload 可稳定转为 `Signal`。
@@ -322,3 +307,19 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **SQLite 文件权限** — `storage.open_database` 在创建数据库文件后尝试 `chmod 0o600`，降低未授权访问风险。
 - **Playwright 版本检测** — `SmartFetcher._fetch_with_playwright` 增加版本探测回退链，避免在部分发行版上因 `__version__` 缺失导致元数据缺失。
 - **Ground Truth** — 全量测试 **1518 passed**。
+
+### v1.0.4 — 2026-08-21
+
+- **Digest v1** — 新增 `digest` CLI 子命令，支持 `daily` / `weekly` 预设及自定义 `--since` / `--until` 时间窗口；按 target 汇总事件并生成 Markdown 报告；支持 `--channel console` 直接输出或通过 `webhook` / `email` 渠道派发；`--min-importance` 可过滤只汇总重要以上事件。
+- **Ground Truth** — 全量测试 **1531 passed**。
+
+### v1.0.5 — 2026-08-21
+
+- **Telegram / Discord 原生通知** — 新增 `TelegramSender`（Bot API `sendMessage`）与 `DiscordSender`（Webhook Embed）；`notify` 与 `digest` 均支持 `--telegram-bot-token` / `--telegram-chat-id` 与 `--channel discord`；Discord embed 描述自动截断至 4000 字符。
+- **通知渠道** — 内置渠道扩展为 Console / Webhook / Slack / Lark / DingTalk / Email / Telegram / Discord。
+- **Ground Truth** — 全量测试 **1531 passed**（含 6 个新增 Telegram/Discord 测试）。
+
+### v1.0.6 — 2026-08-21
+
+- **Web UI v1** — 新增 `webui` CLI 子命令，启动轻量本地监控台（默认 `127.0.0.1:8080`）。默认仅本机可访问；如需远程访问，请通过 SSH 隧道或反向代理暴露，不要直接将 `--host 0.0.0.0` 暴露到公网。基于 Python 标准库 `http.server`，零外部依赖；页面包括仪表盘 `/`、目标列表 `/targets`、事件详情 `/events/<id>`；JSON API 包括 `/api/targets`、`/api/events`（分页/过滤）、`/api/events/<id>`（含 signals）、`/api/stats`。
+- **Ground Truth** — 全量测试 **1540 passed**（含 9 个新增 Web UI 测试）。

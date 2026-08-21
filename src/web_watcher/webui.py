@@ -245,33 +245,6 @@ class WebUIServer(HTTPServer):
     def __init__(self, host: str, port: int, repository: Repository):
         super().__init__((host, port), WebUIHandler)
         self.repository = repository
-        self._allowed_origins = {"http://localhost:8080", "http://127.0.0.1:8080"}
-
-    @staticmethod
-    def _serialize_dt(value: Optional[datetime]) -> Optional[str]:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.isoformat()
-
-    @staticmethod
-    def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-        if not value:
-            return None
-        try:
-            dt = datetime.fromisoformat(value)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            return None
-    """HTTP server with repository access."""
-
-    def __init__(self, host: str, port: int, repository: Repository):
-        super().__init__((host, port), WebUIHandler)
-        self.repository = repository
-        self._allowed_origins = {"http://localhost:8080", "http://127.0.0.1:8080"}
 
     @staticmethod
     def _serialize_dt(value: Optional[datetime]) -> Optional[str]:

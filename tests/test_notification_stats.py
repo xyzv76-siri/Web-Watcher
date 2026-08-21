@@ -24,6 +24,7 @@ def _make_args(**overrides):
     args.notify_retry = False
     args.notify_retry_limit = 10
     args.notify_stats = False
+    args.smtp_password = None
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
