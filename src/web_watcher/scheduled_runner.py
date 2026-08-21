@@ -494,16 +494,25 @@ class ScheduledRunner:
         # 1.3 Rule registry filtering (after tag filtering)
         registry_filtered = 0
         if self.registry is not None and self._rule_cache:
-            enabled_rule_ids = set(self.registry.get_enabled_rules())
-            if enabled_rule_ids:
-                disabled_ids = [r_id for r_id in self._rule_cache if r_id not in enabled_rule_ids]
-                registry_filtered = len(disabled_ids)
-                if disabled_ids:
-                    self._rule_cache = {k: v for k, v in self._rule_cache.items() if k in enabled_rule_ids}
-            # Sort by priority (descending)
+            all_registry_rules = self.registry.list_rules()
+            registry_map = {r["rule_id"]: r for r in all_registry_rules}
+
+            filtered_cache = {}
+            for r_id, r in self._rule_cache.items():
+                if r_id in registry_map:
+                    if registry_map[r_id]["enabled"]:
+                        filtered_cache[r_id] = r
+                    else:
+                        registry_filtered += 1
+                else:
+                    # Not in registry = default enabled
+                    filtered_cache[r_id] = r
+
+            self._rule_cache = filtered_cache
+            # Sort by priority (descending); missing registry entry = priority 0
             self._rule_cache = dict(sorted(
                 self._rule_cache.items(),
-                key=lambda item: self.registry.get(item[0]) and self.registry.get(item[0]).get("priority", 0) or 0,
+                key=lambda item: registry_map.get(item[0], {}).get("priority", 0),
                 reverse=True,
             ))
 
@@ -519,6 +528,28 @@ class ScheduledRunner:
         elif self._rule_cache:
             for r_id, r in self._rule_cache.items():
                 claimed.append(Target(id=r.id, url=r.target.url, interval=r.target.interval))
+
+        # 2.1 Filter claimed targets against rule cache (post tag/registry filtering)
+        # and release leases for filtered-out targets
+        filtered_claimed = []
+        for target in claimed:
+            if target.id in self._rule_cache:
+                filtered_claimed.append(target)
+            elif hasattr(self.repo, "release_target_lease") and getattr(target, "claim_token", None):
+                try:
+                    self.repo.release_target_lease(target.id, target.claim_token, now=now)
+                except Exception:
+                    pass
+        claimed = filtered_claimed
+
+        # 2.2 Sort claimed targets by registry priority (descending)
+        if self.registry is not None and claimed:
+            all_registry_rules = self.registry.list_rules()
+            registry_map = {r["rule_id"]: r for r in all_registry_rules}
+            claimed.sort(
+                key=lambda t: registry_map.get(t.id, {}).get("priority", 0),
+                reverse=True,
+            )
 
         summary = {
             "targets_evaluated": len(claimed),
