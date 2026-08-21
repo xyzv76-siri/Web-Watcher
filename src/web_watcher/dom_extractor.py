@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 from web_watcher.rule_models import ExtractorConfig, ExtractionStatus, ExtractionResult
 from web_watcher.transforms import apply_transform
+from web_watcher.diff_scope import ScopeMiss, ScopeInvalid
 
 
 class DOMExtractor:
@@ -54,7 +55,33 @@ class DOMExtractor:
                         metadata=meta,
                     )
 
-                if len(elements) > 1:
+                # Diff scope: further narrow extractor output before transforms.
+                if config.scope_selector:
+                    meta["scope_selector"] = config.scope_selector
+                    scoped_elements = []
+                    for el in elements:
+                        try:
+                            found = el.select(config.scope_selector)
+                        except Exception as exc:
+                            return ExtractionResult(
+                                status=ExtractionStatus.TRANSFORM_ERROR,
+                                error_message=f"Invalid scope_selector '{config.scope_selector}': {exc}",
+                                metadata=meta,
+                            )
+                        if not found:
+                            meta["scope_miss"] = True
+                            meta["scope_selector"] = config.scope_selector
+                            meta["scope_input_length"] = len(str(el))
+                            return ExtractionResult(
+                                status=ExtractionStatus.SELECTOR_NOT_FOUND,
+                                error_message=f"scope_selector '{config.scope_selector}' matched 0 elements within extractor result",
+                                metadata=meta,
+                            )
+                        scoped_elements.extend(found)
+                    elements = scoped_elements
+
+                # Without scope_selector, preserve legacy MULTIPLE_MATCH behavior.
+                if not config.scope_selector and len(elements) > 1:
                     return ExtractionResult(
                         status=ExtractionStatus.MULTIPLE_MATCH,
                         raw_value=None,
@@ -63,7 +90,23 @@ class DOMExtractor:
                         metadata=meta,
                     )
 
-                raw_text = elements[0].get_text()
+                if len(elements) == 0:
+                    # Should be unreachable because scope miss is handled above,
+                    # but keep guard for safety.
+                    return ExtractionResult(
+                        status=ExtractionStatus.SELECTOR_NOT_FOUND,
+                        error_message="No elements after applying diff scope",
+                        metadata=meta,
+                    )
+
+                if len(elements) > 1:
+                    merged_html = "".join(str(el) for el in elements)
+                    merged_soup = BeautifulSoup(merged_html, "html.parser")
+                    raw_text = merged_soup.get_text()
+                    meta["merged_count"] = len(elements)
+                else:
+                    raw_text = elements[0].get_text()
+
                 return cls._apply_transforms(raw_text, config, meta)
 
             else:

@@ -16,6 +16,7 @@ class ExtractorConfig:
     selector_type: str = "css"
     selector: str = ""
     transforms: List[str] = field(default_factory=list)
+    scope_selector: Optional[str] = None
 
 
 @dataclass
