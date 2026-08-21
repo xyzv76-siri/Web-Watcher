@@ -293,3 +293,14 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **Notification Retry & Stats v1** — `notify --stats` 输出按状态/渠道聚合的投递统计；`notify --retry` 重试失败通知。
 - **GitHub Subresource Isolation v1** — `GitHubTarget` 支持 `watch_types`（releases/stars/tags）子资源状态隔离。
 - **Ground Truth** — 全量测试 **1518 passed**；12 项运行时行为验证全部通过。
+
+### v1.0.3 — 2026-08-21
+
+- **Signal Contract 统一** — `GitHubTarget`、`GenericWebTarget`、`RSSFeedTarget` 的 Signal 构造统一为 `value=` + `observed_at=`，移除已弃用的 `payload=` / `created_at=`；异常处理收紧为 `TypeError/ValueError`，避免裸 `except Exception` 吞错。
+- **Signal 归一化增强** — `scheduled_runner._normalize_signal` 增加 `observed_at` / `signal_type` / `value` 的兜底解析，dict-based payload 可稳定转为 `Signal`。
+- **Fingerprint 持久化** — `GenericWebTarget`、`GitHubTarget`、`RSSFeedTarget` 在创建 `Signal` 时携带确定性 `fingerprint`，支持 `UNIQUE(entity_id, signal_type, fingerprint)` 去重。
+- **测试覆盖修正** — signal-based 测试统一通过 `json.loads(sig.value)` 读取 payload；`test_distinct_changes_produce_distinct_fingerprints` 验证 distinct signals 携带 distinct fingerprints。
+- **SMTP 密码安全** — `--smtp-password` CLI 参数添加 `DeprecationWarning`，帮助文本明确提示命令行传密码存在泄露风险，推荐使用 `WEB_WATCHER_SMTP_PASSWORD` 环境变量。
+- **SQLite 文件权限** — `storage.open_database` 在创建数据库文件后尝试 `chmod 0o600`，降低未授权访问风险。
+- **Playwright 版本检测** — `SmartFetcher._fetch_with_playwright` 增加版本探测回退链，避免在部分发行版上因 `__version__` 缺失导致元数据缺失。
+- **Ground Truth** — 全量测试 **1518 passed**。
