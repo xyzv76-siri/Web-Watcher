@@ -13,7 +13,7 @@ import yaml
 
 from .channel_senders import WebhookSender
 from .event_correlator import EventCorrelator
-from .exporter import AuditExporter
+from .exporter import AuditExporter, parse_since
 from .investigation_worker import InvestigationWorker
 from .notification_dispatcher import NotificationDispatcher
 from .pipeline_runner import PipelineRunner
@@ -221,6 +221,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Time filter (e.g. 24h, 7d, 30m)",
     )
     export_parser.add_argument(
+        "--entity-id",
+        dest="export_entity_ids",
+        action="append",
+        type=int,
+        default=None,
+        help="Filter by entity ID (repeatable)",
+    )
+    export_parser.add_argument(
+        "--event-type",
+        dest="export_event_types",
+        action="append",
+        default=None,
+        help="Filter by event type (repeatable)",
+    )
+    export_parser.add_argument(
+        "--importance",
+        dest="export_importances",
+        action="append",
+        default=None,
+        help="Filter by importance (repeatable)",
+    )
+    export_parser.add_argument(
+        "--status",
+        dest="export_statuses",
+        action="append",
+        default=None,
+        help="Filter by event status (repeatable)",
+    )
+    export_parser.add_argument(
+        "--channel",
+        dest="export_channels",
+        action="append",
+        default=None,
+        help="Filter by notification channel (repeatable)",
+    )
+    export_parser.add_argument(
         "--output",
         "-o",
         default=None,
@@ -272,6 +308,42 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override retention max age in days (default: from AppConfig)",
+    )
+    retention_parser.add_argument(
+        "--entity-id",
+        dest="retention_entity_ids",
+        action="append",
+        type=int,
+        default=None,
+        help="Filter by entity ID (repeatable)",
+    )
+    retention_parser.add_argument(
+        "--event-type",
+        dest="retention_event_types",
+        action="append",
+        default=None,
+        help="Filter by event type (repeatable)",
+    )
+    retention_parser.add_argument(
+        "--importance",
+        dest="retention_importances",
+        action="append",
+        default=None,
+        help="Filter by importance (repeatable)",
+    )
+    retention_parser.add_argument(
+        "--status",
+        dest="retention_statuses",
+        action="append",
+        default=None,
+        help="Filter by event status (repeatable)",
+    )
+    retention_parser.add_argument(
+        "--channel",
+        dest="retention_channels",
+        action="append",
+        default=None,
+        help="Filter by notification channel (repeatable)",
     )
     retention_parser.add_argument(
         "--db",
@@ -555,10 +627,108 @@ def handle_export(args: argparse.Namespace, config: AppConfig) -> int:
     repo = Repository(db_path)
     exporter = AuditExporter(repo)
 
+    since_dt = parse_since(since) if isinstance(since, str) else since
+    data = exporter.collect_data(
+        since=since_dt,
+        entity_ids=getattr(args, "export_entity_ids", None),
+        event_types=getattr(args, "export_event_types", None),
+        importances=getattr(args, "export_importances", None),
+        statuses=getattr(args, "export_statuses", None),
+        channels=getattr(args, "export_channels", None),
+    )
+    events = data["events"]
+    notifications = data["notifications"]
+
     if fmt == "html":
-        content = exporter.export_html(since)
+        lines = [
+            "<!DOCTYPE html>",
+            "<html lang=\"zh-CN\">",
+            "<head>",
+            "  <meta charset=\"UTF-8\">",
+            "  <title>Web Watcher Audit Report</title>",
+            "  <style>",
+            "    body { font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; margin: 40px; color: #333; }",
+            "    h1 { border-bottom: 2px solid #eaecef; padding-bottom: 10px; }",
+            "    .meta { background: #f6f8fa; padding: 12px; border-radius: 6px; margin-bottom: 20px; }",
+            "    table { width: 100%; border-collapse: collapse; margin-top: 16px; }",
+            "    th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }",
+            "    th { background-color: #f6f8fa; }",
+            "    .badge { background: #0366d6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 12px; }",
+            "  </style>",
+            "</head>",
+            "<body>",
+            "  <h1>Web Watcher 离线审计报告</h1>",
+            f"  <div class=\"meta\">",
+            f"    <p><strong>生成时间:</strong> {data['generated_at'].strftime('%Y-%m-%d %H:%M:%S')} UTC</p>",
+            f"    <p><strong>时间跨度:</strong> {since or 'All'} | <strong>事件数:</strong> {len(events)} | <strong>通知数:</strong> {len(notifications)}</p>",
+            "  </div>",
+            "  <h2>事件列表</h2>",
+            "  <table>",
+            "    <thead>",
+            "      <tr><th>Event ID</th><th>Title</th><th>Importance</th><th>Status</th></tr>",
+            "    </thead>",
+            "    <tbody>",
+        ]
+
+        if not events:
+            lines.append("      <tr><td colspan=\"4\">暂无事件记录</td></tr>")
+        else:
+            for ev in events:
+                ev_id = html.escape(str(getattr(ev, "id", getattr(ev, "event_id", "N/A"))))
+                payload = getattr(ev, "payload", {}) or {}
+                title = html.escape(str(payload.get("title") or getattr(ev, "title", getattr(ev, "event_type", "Event"))))
+                importance = html.escape(str(getattr(ev, "importance", "unknown")))
+                status = html.escape(str(getattr(ev, "status", "unknown")))
+                lines.append(f"      <tr><td><code>{ev_id}</code></td><td>{title}</td><td><span class=\"badge\">{importance}</span></td><td>{status}</td></tr>")
+
+        lines.append("    </tbody>")
+        lines.append("  </table>")
+        lines.append("</body>")
+        lines.append("</html>")
+        content = "\n".join(lines)
     else:
-        content = exporter.export_markdown(since)
+        lines = [
+            "# Web Watcher 审计报告",
+            "",
+            f"- **生成时间 (UTC)**: {data['generated_at'].strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- **时间范围 (Since)**: {since or 'All'}",
+            f"- **事件总数**: {len(events)}",
+            f"- **通知记录数**: {len(notifications)}",
+            "",
+            "## 事件明细与处置记录",
+            "",
+        ]
+
+        if not events:
+            lines.append("_在指定时间段内未发现事件记录。_")
+        else:
+            for ev in events:
+                ev_id = getattr(ev, "id", getattr(ev, "event_id", "N/A"))
+                payload = getattr(ev, "payload", {}) or {}
+                title = payload.get("title") or getattr(ev, "title", getattr(ev, "event_type", "Event"))
+                status = getattr(ev, "status", "unknown")
+                importance = getattr(ev, "importance", "info")
+                lines.append(f"### 事件: {title} (`{ev_id}`)")
+                lines.append(f"- **状态**: `{status}` | **重要级别**: `{importance}`")
+                desc = payload.get("body") or getattr(ev, "description", None)
+                if desc:
+                    lines.append(f"- **描述**: {desc}")
+
+                rel_notifs = [
+                    n for n in notifications
+                    if str(getattr(n, "event_id", "")) == str(ev_id)
+                ]
+                if rel_notifs:
+                    lines.append("- **外发通知**:")
+                    for n in rel_notifs:
+                        ch = getattr(n, "channel", "unknown")
+                        st = getattr(n, "status", "unknown")
+                        n_payload = getattr(n, "payload", {}) or {}
+                        rec = n_payload.get("recipient") or getattr(n, "recipient", "N/A")
+                        lines.append(f"  - [{ch.upper()}] 状态: `{st}` | 目标: `{rec}`")
+                lines.append("")
+
+        content = "\n".join(lines)
 
     if output:
         with open(output, "w", encoding="utf-8") as f:
@@ -601,12 +771,23 @@ def handle_retention(args: argparse.Namespace, config: AppConfig) -> int:
     policy = RetentionPolicy(
         max_age_days=max_age_days if max_age_days is not None else config.retention_max_age_days,
         dry_run=dry_run,
+        entity_ids=getattr(args, "retention_entity_ids", None),
+        event_types=getattr(args, "retention_event_types", None),
+        importances=getattr(args, "retention_importances", None),
+        statuses=getattr(args, "retention_statuses", None),
+        channels=getattr(args, "retention_channels", None),
     )
     manager = RetentionManager(repo=repo, policy=policy)
     summary = manager.enforce()
 
     action = "Would delete" if summary["dry_run"] else "Deleted"
-    print(f"{action} {summary['deleted_events']} event(s) and {summary['deleted_notifications']} notification(s).")
+    filters = summary.get("filters", {})
+    filter_parts = []
+    for key, value in filters.items():
+        if value:
+            filter_parts.append(f"{key}={value}")
+    filter_str = f" [filters: {', '.join(filter_parts)}]" if filter_parts else ""
+    print(f"{action} {summary['deleted_events']} event(s) and {summary['deleted_notifications']} notification(s).{filter_str}")
     return 0
 
 

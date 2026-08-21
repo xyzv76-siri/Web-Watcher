@@ -1,8 +1,11 @@
 import re
 import html
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Union
 from web_watcher.repository import Repository
+from web_watcher.event_types import EventType
+from web_watcher.event_status import EventStatus
+from web_watcher.importance import Importance
 
 
 def parse_since(since_str: Optional[str]) -> Optional[datetime]:
@@ -34,13 +37,30 @@ class AuditExporter:
     def __init__(self, repo: Repository):
         self.repo = repo
 
-    def collect_data(self, since: Optional[datetime] = None) -> Dict[str, Any]:
+    def collect_data(
+        self,
+        since: Optional[datetime] = None,
+        entity_ids: Optional[List[int]] = None,
+        event_types: Optional[List[Union[EventType, str]]] = None,
+        importances: Optional[List[Union[Importance, str]]] = None,
+        statuses: Optional[List[Union[EventStatus, str]]] = None,
+        channels: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         events = []
         if hasattr(self.repo, "list_events"):
             try:
-                events = self.repo.list_events(since=since)
+                events = self.repo.list_events(
+                    entity_id=entity_ids,
+                    event_type=event_types,
+                    importance=importances,
+                    status=statuses,
+                    since=since,
+                )
             except TypeError:
-                events = self.repo.list_events()
+                try:
+                    events = self.repo.list_events()
+                except Exception:
+                    events = []
 
         if since and events:
             events = [
@@ -52,13 +72,29 @@ class AuditExporter:
         if hasattr(self.repo, "list_all_notifications"):
             notifications = self.repo.list_all_notifications()
         elif hasattr(self.repo, "list_notifications"):
-            notifications = self.repo.list_notifications()
+            try:
+                notifications = self.repo.list_notifications(
+                    channel=channels,
+                    since=since,
+                )
+            except TypeError:
+                try:
+                    notifications = self.repo.list_notifications()
+                except Exception:
+                    notifications = []
 
         return {
             "events": events,
             "notifications": notifications,
             "generated_at": datetime.now(timezone.utc),
             "since": since,
+            "filters": {
+                "entity_ids": entity_ids,
+                "event_types": [str(t) for t in event_types] if event_types else None,
+                "importances": [str(i) for i in importances] if importances else None,
+                "statuses": [str(s) for s in statuses] if statuses else None,
+                "channels": channels,
+            },
         }
 
     def export_markdown(self, since_str: Optional[str] = "24h") -> str:

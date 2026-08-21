@@ -1042,6 +1042,136 @@ class Repository:
         self.connection.commit()
         return cursor.rowcount
 
+    def list_events(
+        self,
+        entity_id: Optional[Union[int, List[int]]] = None,
+        event_type: Optional[Union[EventType, str, List[Union[EventType, str]]]] = None,
+        importance: Optional[Union[Importance, str, List[Union[Importance, str]]]] = None,
+        status: Optional[Union[EventStatus, str, List[Union[EventStatus, str]]]] = None,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> list[Event]:
+        """Return events matching the provided filters."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if entity_id is not None:
+            if isinstance(entity_id, list):
+                if entity_id:
+                    clauses.append(f"entity_id IN ({', '.join('?' * len(entity_id))})")
+                    params.extend(entity_id)
+            else:
+                clauses.append("entity_id = ?")
+                params.append(entity_id)
+        if event_type is not None:
+            if isinstance(event_type, list):
+                if event_type:
+                    clauses.append(f"event_type IN ({', '.join('?' * len(event_type))})")
+                    params.extend(str(t) for t in event_type)
+            else:
+                clauses.append("event_type = ?")
+                params.append(str(event_type))
+        if importance is not None:
+            if isinstance(importance, list):
+                if importance:
+                    clauses.append(f"importance IN ({', '.join('?' * len(importance))})")
+                    params.extend(str(i) for i in importance)
+            else:
+                clauses.append("importance = ?")
+                params.append(str(importance))
+        if status is not None:
+            if isinstance(status, list):
+                if status:
+                    clauses.append(f"status IN ({', '.join('?' * len(status))})")
+                    params.extend(str(s) for s in status)
+            else:
+                clauses.append("status = ?")
+                params.append(str(status))
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(_serialize_datetime(since))
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT id, entity_id, event_type, status, importance, created_at, updated_at FROM events {where} ORDER BY created_at DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            Event(
+                id=r["id"],
+                entity_id=r["entity_id"],
+                event_type=_deserialize_event_type(r["event_type"]),
+                status=_deserialize_event_status(r["status"]),
+                importance=_deserialize_importance(r["importance"]),
+                created_at=_parse_iso_datetime(r["created_at"]) or _fallback_datetime(),
+                updated_at=_parse_iso_datetime(r["updated_at"]) or _fallback_datetime(),
+            )
+            for r in rows
+        ]
+
+    def list_notifications(
+        self,
+        event_id: Optional[Union[int, List[int]]] = None,
+        channel: Optional[Union[str, List[str]]] = None,
+        status: Optional[Union[str, List[str]]] = None,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> list[Notification]:
+        """Return notifications matching the provided filters."""
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if event_id is not None:
+            if isinstance(event_id, list):
+                if event_id:
+                    clauses.append(f"event_id IN ({', '.join('?' * len(event_id))})")
+                    params.extend(event_id)
+            else:
+                clauses.append("event_id = ?")
+                params.append(event_id)
+        if channel is not None:
+            if isinstance(channel, list):
+                if channel:
+                    clauses.append(f"channel IN ({', '.join('?' * len(channel))})")
+                    params.extend(channel)
+            else:
+                clauses.append("channel = ?")
+                params.append(channel)
+        if status is not None:
+            if isinstance(status, list):
+                if status:
+                    clauses.append(f"status IN ({', '.join('?' * len(status))})")
+                    params.extend(status)
+            else:
+                clauses.append("status = ?")
+                params.append(status)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(_serialize_datetime(since))
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT id, event_id, channel, status, created_at, sent_at, payload, dispatch_owner, dispatch_until, dispatch_token FROM notifications {where} ORDER BY created_at DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+
+        rows = self.connection.execute(sql, params).fetchall()
+        return [
+            Notification(
+                id=r["id"],
+                event_id=r["event_id"],
+                channel=r["channel"],
+                status=r["status"],
+                created_at=_parse_iso_datetime(r["created_at"]) or _fallback_datetime(),
+                sent_at=_parse_iso_datetime(r["sent_at"]),
+                payload=json.loads(r["payload"] or "{}"),
+                dispatch_owner=r["dispatch_owner"],
+                dispatch_until=_parse_iso_datetime(r["dispatch_until"]),
+                dispatch_token=r["dispatch_token"],
+            )
+            for r in rows
+        ]
+
     def _init_target_table(self):
         self.connection.execute("""
             CREATE TABLE IF NOT EXISTS targets (
