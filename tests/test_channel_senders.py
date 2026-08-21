@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 import urllib.error
@@ -125,7 +126,7 @@ def test_telegram_sender_success(mock_urlopen):
     mock_resp.read.return_value = b'{"ok": true, "result": {"message_id": 1}}'
     mock_urlopen.return_value.__enter__.return_value = mock_resp
 
-    sender = TelegramSender(bot_token="TOKEN", chat_id="CHAT")
+    sender = TelegramSender(bot_token=os.getenv("TEST_TELEGRAM_BOT_TOKEN", "TOKEN"), chat_id=os.getenv("TEST_TELEGRAM_CHAT_ID", "CHAT"))
     notif = Notification(id="notif_7", event_id=107, channel="telegram", status="pending", created_at=_now(), payload={"event_type": "content_change", "importance": "important"})
 
     res = sender.send(notif)
@@ -144,7 +145,7 @@ def test_telegram_sender_http_error(mock_urlopen):
         fp=io.BytesIO(b"error"),
     )
 
-    sender = TelegramSender(bot_token="TOKEN", chat_id="CHAT")
+    sender = TelegramSender(bot_token=os.getenv("TEST_TELEGRAM_BOT_TOKEN", "TOKEN"), chat_id=os.getenv("TEST_TELEGRAM_CHAT_ID", "CHAT"))
     notif = Notification(id="notif_8", event_id=108, channel="telegram", status="pending", created_at=_now(), payload={})
 
     res = sender.send(notif)
@@ -157,7 +158,7 @@ def test_telegram_sender_http_error(mock_urlopen):
 def test_telegram_sender_network_error(mock_urlopen):
     mock_urlopen.side_effect = TimeoutError("Connection timed out")
 
-    sender = TelegramSender(bot_token="TOKEN", chat_id="CHAT")
+    sender = TelegramSender(bot_token=os.getenv("TEST_TELEGRAM_BOT_TOKEN", "TOKEN"), chat_id=os.getenv("TEST_TELEGRAM_CHAT_ID", "CHAT"))
     notif = Notification(id="notif_9", event_id=109, channel="telegram", status="pending", created_at=_now(), payload={})
 
     res = sender.send(notif)

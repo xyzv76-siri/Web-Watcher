@@ -52,7 +52,7 @@ def parse_retry_after(retry_after_str: Optional[str], now: Optional[datetime] = 
             target_dt = _to_utc_aware(parsed_dt)
             diff = (target_dt - now_dt).total_seconds()
             return max(0.0, diff)
-    except Exception:
+    except (TypeError, ValueError):
         pass
     return None
 

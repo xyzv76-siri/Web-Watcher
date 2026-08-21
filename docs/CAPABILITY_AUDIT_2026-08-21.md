@@ -92,8 +92,8 @@
 ## 四、当前工作区状态
 
 - 分支 `master` 与 `origin/master` 同步
-- HEAD / origin/master：`44ec2a7` (docs: add Web UI v1 release notes in README v1.0.6)
-- 最新 tag：`web-watcher-1.0.2`
+- HEAD / origin/master：`a367d73` (docs: restore DESIGN_DIGEST_V1.md; bump tag to 1.0.6)
+- 最新 tag：`web-watcher-1.0.6`
 - 测试：1540 passed
 - 已提交：`docs/CAPABILITY_AUDIT_2026-08-21.md`
 - 已归档设计文档：`docs/DESIGN_TELEGRAM_DISCORD_V1.md`、`docs/DESIGN_WEBUI_V1.md`

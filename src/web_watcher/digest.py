@@ -162,7 +162,7 @@ class DigestBuilder:
                             return ", ".join(parts)
                     except (json.JSONDecodeError, KeyError):
                         pass
-        except Exception:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
         return f"{event.event_type} ({event.importance})"
 

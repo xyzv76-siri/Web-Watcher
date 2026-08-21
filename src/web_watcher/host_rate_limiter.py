@@ -58,7 +58,7 @@ class HostRateLimiter:
         if claim_token and self._repository is not None:
             try:
                 self._repository.release_host_request(host, claim_token)
-            except Exception:
+            except (sqlite3.Error, ValueError, TypeError):
                 pass
 
     def update_after_response(self, host: str, next_allowed_at: Optional[datetime]) -> None:

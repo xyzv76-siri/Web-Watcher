@@ -15,6 +15,8 @@ def open_database(path: str | Path) -> sqlite3.Connection:
         db_path.chmod(0o600)
     except OSError:
         pass
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

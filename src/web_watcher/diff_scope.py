@@ -7,6 +7,7 @@ fragment produced by an extractor, *before* transforms run.
 from typing import List, Optional, Tuple
 
 from bs4 import BeautifulSoup
+from soupsieve import SelectorSyntaxError
 
 
 class ScopeMiss(Exception):
@@ -48,7 +49,7 @@ def apply_diff_scope(
     try:
         soup = BeautifulSoup(html_content, "html.parser")
         elements = soup.select(selector)
-    except Exception as exc:
+    except (NotImplementedError, ValueError, TypeError, SelectorSyntaxError) as exc:
         raise ScopeInvalid(f"Invalid CSS selector '{selector}': {exc}") from exc
 
     if not elements:

@@ -1,10 +1,14 @@
 import os
 import json
 import logging
+import sqlite3
 import socket
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Tuple
+
+import yaml
+from web_watcher.rule_parser import RuleParser, RuleParseError
 
 from web_watcher.repository import Repository
 from web_watcher.models import Target, TargetStatus
@@ -83,7 +87,7 @@ class ScheduledRunner:
             try:
                 from .rule_registry import RuleRegistry
                 self.registry = RuleRegistry(self.repo)
-            except Exception:
+            except (ImportError, ModuleNotFoundError, AttributeError):
                 self.registry = None
 
         self.cross_target_correlator = None
@@ -101,16 +105,13 @@ class ScheduledRunner:
             if getattr(self.config, "cross_target_rules_path", None):
                 raise
             self.cross_target_correlator = None
-        except Exception:
-            # Any other validation/parse error must not be silenced.
-            raise
 
     def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
         if not self.metrics:
             return
         try:
             self.metrics.increment(name, tags=tags, amount=amount)
-        except Exception:
+        except (OSError, ValueError, TypeError, RuntimeError):
             pass
 
     def _get_rules_snapshot(self, path: Optional[Union[str, Path]] = None) -> Tuple[Optional[float], Optional[str]]:
@@ -124,7 +125,7 @@ class ScheduledRunner:
             import hashlib
             file_hash = hashlib.sha256(content).hexdigest()
             return mtime, file_hash
-        except Exception:
+        except (OSError, ValueError, TypeError):
             return None, None
 
     def _check_rules_changed(self, path: Optional[Union[str, Path]] = None) -> bool:
@@ -156,7 +157,7 @@ class ScheduledRunner:
         # Parse new ruleset
         try:
             ruleset = RuleParser.parse_file(p)
-        except Exception as e:
+        except (RuleParseError, FileNotFoundError, yaml.YAMLError) as e:
             logger.error(f"Failed to parse rules file during reload: {e}")
             return {"reloaded": 0, "filtered": 0, "skipped": 0, "error": str(e)}
 
@@ -302,9 +303,8 @@ class ScheduledRunner:
         if not p.exists():
             raise FileNotFoundError(f"Cross-target rules file not found: {p}")
         try:
-            import yaml
             data = yaml.safe_load(p.read_bytes())
-        except Exception as exc:
+        except yaml.YAMLError as exc:
             raise ValueError(f"Invalid cross_target rules YAML: {exc}") from exc
 
         if not isinstance(data, dict):
@@ -334,7 +334,7 @@ class ScheduledRunner:
                     min_signals=int(item.get("min_signals", 2)),
                     importance_boost=item.get("importance_boost", "important"),
                 ))
-            except Exception as exc:
+            except (TypeError, ValueError) as exc:
                 raise ValueError(f"Invalid rule '{item.get('name')}': {exc}") from exc
         return rules
 
@@ -348,7 +348,7 @@ class ScheduledRunner:
         previous_rules = list(self.cross_target_correlator.rules) if self.cross_target_correlator is not None else []
         try:
             new_rules = self._load_cross_target_rules_from_yaml(target_path)
-        except Exception as exc:
+        except (FileNotFoundError, ValueError, TypeError, yaml.YAMLError) as exc:
             return {
                 "reloaded": 0,
                 "error": str(exc),
@@ -500,9 +500,9 @@ class ScheduledRunner:
                             correlation_plan.events_to_update.extend(plan.events_to_update)
                             correlation_plan.signals_to_persist.extend(plan.signals_to_persist)
                             correlation_plan.links.extend(plan.links)
-                        except Exception:
+                        except (sqlite3.Error, ValueError, TypeError, AttributeError):
                             pass
-            except Exception:
+            except (sqlite3.Error, ValueError):
                 correlation_plan = None
 
         if correlation_plan is not None:
@@ -591,7 +591,7 @@ class ScheduledRunner:
                         self._last_cross_target_rules_mtime = current_mtime
                 elif current_mtime is not None and self._last_cross_target_rules_mtime is None:
                     self._last_cross_target_rules_mtime = current_mtime
-            except Exception as exc:
+            except (OSError, yaml.YAMLError, ValueError) as exc:
                 logger.warning(f"Cross-target rules hot reload failed: {exc}")
 
         # 1. 自动同步 YAML 规则
@@ -602,7 +602,7 @@ class ScheduledRunner:
         if self.repo is not None and hasattr(self.repo, "reap_stale_claims"):
             try:
                 self.repo.reap_stale_claims(older_than=now)
-            except Exception:
+            except sqlite3.Error:
                 pass
 
         # 1.2 Tag filtering (before execution)
@@ -681,7 +681,7 @@ class ScheduledRunner:
             elif hasattr(self.repo, "release_target_lease") and getattr(target, "claim_token", None):
                 try:
                     self.repo.release_target_lease(target.id, target.claim_token, now=now)
-                except Exception:
+                except (sqlite3.Error, ValueError):
                     pass
         claimed = filtered_claimed
 
@@ -749,7 +749,7 @@ class ScheduledRunner:
                     # Unclaimed target (fallback path): nothing to commit or release
                     pass
 
-            except Exception as e:
+            except (OSError, ValueError, TypeError, sqlite3.Error, RuntimeError) as e:
                 self._inc("fetch_error_total", {"target_id": target.id})
                 logger.error(
                     f"Error evaluating target '{target.id}': {e}",
@@ -760,7 +760,7 @@ class ScheduledRunner:
                 if claim_token and hasattr(self.repo, "release_target_lease"):
                     try:
                         self.repo.release_target_lease(target.id, claim_token, now=now)
-                    except Exception:
+                    except (sqlite3.Error, ValueError):
                         pass
 
         # 4. Cross-target correlation
@@ -856,7 +856,7 @@ class ScheduledRunner:
                                         for sig in group.signals:
                                             if sig.signal_id is not None:
                                                 self.repo.attach_signal_to_event(event.id, sig.signal_id)
-                                except Exception:
+                                except sqlite3.Error:
                                     event = self.repo.create_event(
                                         entity_id=entity.id,
                                         event_type="cross_target",
@@ -939,11 +939,11 @@ class ScheduledRunner:
                                         "has_investigation": False,
                                     },
                                 )
-                            except Exception:
+                            except (sqlite3.Error, ValueError):
                                 pass
-                    except Exception:
+                    except (sqlite3.Error, ValueError):
                         pass
-            except Exception as exc:
+            except (sqlite3.Error, ValueError) as exc:
                 logger.warning(f"Cross-target correlation failed: {exc}")
 
         # 4.1 Event-based cross-target correlation
@@ -1004,9 +1004,9 @@ class ScheduledRunner:
                                 "has_investigation": False,
                             },
                         )
-                    except Exception:
+                    except (sqlite3.Error, ValueError):
                         pass
-            except Exception as exc:
+            except (sqlite3.Error, ValueError) as exc:
                 logger.warning(f"Event-based cross-target correlation failed: {exc}")
 
         # 5. 自动外发通知
@@ -1014,7 +1014,7 @@ class ScheduledRunner:
             try:
                 dispatcher = NotificationDispatcher(repository=self.repo, config=self.config)
                 dispatcher.run_once()
-            except Exception as e:
+            except (OSError, ValueError, TypeError, RuntimeError) as e:
                 logger.warning(f"Auto delivery failed: {e}")
 
         return summary

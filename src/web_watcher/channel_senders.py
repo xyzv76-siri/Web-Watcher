@@ -73,7 +73,7 @@ class ConsoleSender(BaseChannelSender):
             msg = self.format_message(notification)
             print(msg, file=self.stream)
             return DeliveryResult(success=True, status_code=200, response_body="Printed to console")
-        except Exception as exc:
+        except (OSError, TypeError) as exc:
             logger.error(f"ConsoleSender failed: {exc}", exc_info=True)
             return DeliveryResult(success=False, error_message=str(exc))
 
@@ -106,7 +106,7 @@ class WebhookSender(BaseChannelSender):
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
 
@@ -137,7 +137,7 @@ class SlackSender(WebhookSender):
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
 
@@ -168,7 +168,7 @@ class LarkSender(WebhookSender):
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
 
@@ -199,7 +199,7 @@ class DingTalkSender(WebhookSender):
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
 
@@ -281,7 +281,7 @@ class EmailSender(BaseChannelSender):
             return DeliveryResult(success=True, status_code=250, response_body="Accepted")
         except smtplib.SMTPException as exc:
             return DeliveryResult(success=False, error_message=f"SMTPError: {str(exc)}")
-        except Exception as exc:
+        except (OSError, ConnectionError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
 
@@ -321,7 +321,7 @@ class TelegramSender(BaseChannelSender):
                 return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
     def _format_text(self, notification: Notification, title: str) -> str:
@@ -373,7 +373,7 @@ class DiscordSender(BaseChannelSender):
                 return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
-        except Exception as exc:
+        except (urllib.error.URLError, TimeoutError) as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
 
     def _format_description(self, notification: Notification) -> str:

@@ -357,7 +357,7 @@ class RSSFeedTarget:
         parse_error = None
         try:
             entries = self.parse_feed(fetch_res.content)
-        except Exception as exc:
+        except (ValueError, TypeError, OSError) as exc:
             parse_error = str(exc)
 
         extracted_results = {

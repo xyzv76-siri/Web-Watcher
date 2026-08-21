@@ -169,7 +169,7 @@ class Engine:
         # ---- Execute the single PlanStep ----
         try:
             tool_result: ToolResult = step.tool.execute(step.task, exec_context)
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             # execute() was entered → step counts
             return _build_result(
                 status=InvestigationStatus.FAILED,

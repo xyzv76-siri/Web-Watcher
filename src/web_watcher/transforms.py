@@ -68,7 +68,7 @@ def apply_transform(value: Any, transform_spec: str) -> Any:
         try:
             data = json.loads(str(value))
             return data.get(key, "")
-        except Exception as e:
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
             raise TransformError(f"JSON parsing failed for '{spec}': {e}")
     else:
         return value

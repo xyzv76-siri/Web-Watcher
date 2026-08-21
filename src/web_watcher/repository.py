@@ -1860,7 +1860,7 @@ class Repository:
                         continue
 
                 return True
-        except Exception:
+        except (sqlite3.Error, ValueError):
             logger.exception("finalize_execution failed for correlation plan")
             return False
 
@@ -1882,7 +1882,7 @@ class Repository:
             )
             self.connection.commit()
             return True
-        except Exception:
+        except sqlite3.Error:
             return False
 
     def get_user_preset(self, name: str) -> Optional[Dict[str, Any]]:
@@ -2036,7 +2036,7 @@ class Repository:
                         continue
 
                 return True
-        except Exception:
+        except (sqlite3.Error, ValueError):
             logger.exception("finalize_execution failed for correlation plan")
             return False
 
@@ -2058,7 +2058,7 @@ class Repository:
             )
             self.connection.commit()
             return True
-        except Exception:
+        except sqlite3.Error:
             return False
 
     def get_user_preset(self, name: str) -> Optional[Dict[str, Any]]:

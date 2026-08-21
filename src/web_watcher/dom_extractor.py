@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from web_watcher.rule_models import ExtractorConfig, ExtractionStatus, ExtractionResult
 from web_watcher.transforms import apply_transform
 from web_watcher.diff_scope import ScopeMiss, ScopeInvalid
+from soupsieve import SelectorSyntaxError
 
 
 class DOMExtractor:
@@ -62,7 +63,7 @@ class DOMExtractor:
                     for el in elements:
                         try:
                             found = el.select(config.scope_selector)
-                        except Exception as exc:
+                        except (NotImplementedError, ValueError, TypeError, SelectorSyntaxError) as exc:
                             return ExtractionResult(
                                 status=ExtractionStatus.TRANSFORM_ERROR,
                                 error_message=f"Invalid scope_selector '{config.scope_selector}': {exc}",
@@ -116,7 +117,7 @@ class DOMExtractor:
                     metadata=meta,
                 )
 
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError, RuntimeError) as e:
             return ExtractionResult(
                 status=ExtractionStatus.TRANSFORM_ERROR,
                 error_message=f"Extractor internal failure: {str(e)}",
@@ -160,7 +161,7 @@ class DOMExtractor:
                 value=val,
                 metadata=meta,
             )
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError, RuntimeError) as e:
             return ExtractionResult(
                 status=ExtractionStatus.TRANSFORM_ERROR,
                 raw_value=raw_text,

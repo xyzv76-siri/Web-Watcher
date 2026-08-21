@@ -68,7 +68,7 @@ class NotificationDispatcher:
             return
         try:
             self.metrics.increment(name, tags=tags, amount=amount)
-        except Exception:
+        except (OSError, ValueError, TypeError, RuntimeError):
             pass
 
     def register_sender(self, channel: str, sender: BaseChannelSender) -> None:
@@ -114,7 +114,7 @@ class NotificationDispatcher:
 
             try:
                 result = sender.send(notification)
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 self._inc("notifications_sent_total", {"channel": notification.channel, "status": "error"})
                 logger.error(
                     f"Unhandled error in channel sender {notification.channel}: {exc}",
@@ -190,7 +190,7 @@ class NotificationDispatcher:
             if dispatch_token and hasattr(self.repository, "release_notification_dispatch"):
                 try:
                     self.repository.release_notification_dispatch(notification.id, dispatch_token)
-                except Exception:
+                except (sqlite3.Error, ValueError, TypeError):
                     pass
 
     def fetch_pending(self, limit: int = 10) -> List[Notification]:

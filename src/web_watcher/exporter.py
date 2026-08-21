@@ -29,7 +29,7 @@ def parse_since(since_str: Optional[str]) -> Optional[datetime]:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
-    except Exception:
+    except (TypeError, ValueError):
         return now - timedelta(hours=24)
 
 
@@ -59,7 +59,7 @@ class AuditExporter:
             except TypeError:
                 try:
                     events = self.repo.list_events()
-                except Exception:
+                except (sqlite3.Error, ValueError, TypeError):
                     events = []
 
         if since and events:
@@ -80,7 +80,7 @@ class AuditExporter:
             except TypeError:
                 try:
                     notifications = self.repo.list_notifications()
-                except Exception:
+                except (sqlite3.Error, ValueError, TypeError):
                     notifications = []
 
         return {

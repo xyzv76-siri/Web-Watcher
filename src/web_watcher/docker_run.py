@@ -88,7 +88,7 @@ def main() -> int:
     while not shutdown_requested:
         try:
             runner.run_once()
-        except Exception as exc:  # pragma: no cover — defensive log
+        except (OSError, ValueError, TypeError, RuntimeError, sqlite3.Error) as exc:  # pragma: no cover — defensive log
             LOGGER.exception("ScheduledRunner iteration failed: %s", exc)
         if not shutdown_requested:
             # Sleep in small increments so we can react to SIGTERM quickly.

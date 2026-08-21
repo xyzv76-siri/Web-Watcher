@@ -48,7 +48,7 @@ class InvestigationWorker:
             return
         try:
             self.metrics.increment(name, tags=tags, amount=amount)
-        except Exception:
+        except (OSError, ValueError, TypeError, RuntimeError):
             pass
 
     def fetch_uninvestigated_events(self, limit: Optional[int] = None) -> List[Event]:
@@ -135,7 +135,7 @@ class InvestigationWorker:
                 planner=self.planner,
                 engine=self.engine,
             )
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             self._record_failed_investigation(event, task_type_str, str(exc))
             return False
 
@@ -219,7 +219,7 @@ class InvestigationWorker:
             try:
                 if self.process_event(event):
                     processed_count += 1
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 logger.error(
                     f"Failed to process investigation for event {event.id}: {exc}",
                     exc_info=True,

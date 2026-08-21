@@ -52,7 +52,7 @@ class RuleEvaluator:
                 "abs": abs,
             }
             return bool(eval(condition, {"__builtins__": None}, context))
-        except Exception:
+        except (SyntaxError, NameError, TypeError, ValueError, RuntimeError):
             return str(old_val) != str(new_val)
 
     @classmethod
@@ -109,7 +109,7 @@ class RuleEvaluator:
             return default
         try:
             return template.format(**context)
-        except Exception:
+        except (KeyError, IndexError, ValueError, TypeError):
             return template
 
     @classmethod
@@ -171,7 +171,7 @@ class RuleEvaluator:
                     if old_val is not None and new_val is not None:
                         delta_num = float(new_val) - float(old_val)
                         pct_num = ((delta_num) / float(old_val) * 100.0) if float(old_val) != 0 else 0.0
-                except Exception:
+                except (ValueError, TypeError):
                     pass
 
                 tmpl_ctx = {

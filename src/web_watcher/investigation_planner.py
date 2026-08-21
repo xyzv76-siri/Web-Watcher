@@ -194,7 +194,7 @@ class Planner:
                 )
             try:
                 task = self._tool_provider.suggest_task(context_copy)
-            except Exception as exc:
+            except (OSError, ValueError, TypeError, RuntimeError, KeyError) as exc:
                 raise PlannerError(
                     "ToolProvider task suggestion failed"
                 ) from exc

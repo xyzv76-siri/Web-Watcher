@@ -275,6 +275,6 @@ class EventCorrelator:
                 evidence_items=evidence_items,
             )
             return True
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             logger.error(f"Auto investigation dispatch failed for event {event.id}: {exc}", exc_info=True)
             return False

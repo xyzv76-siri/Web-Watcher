@@ -56,7 +56,7 @@ def _validate_url(url: str) -> None:
 
     try:
         parsed = urlparse(url.strip())
-    except Exception as exc:
+    except (ValueError, TypeError) as exc:
         raise ValueError(f"Invalid URL: {exc}") from exc
 
     if not parsed.scheme:

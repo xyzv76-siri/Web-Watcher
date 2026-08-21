@@ -302,7 +302,7 @@ class AIJudge:
             raise
         except AIError:
             raise
-        except Exception as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             raise ProviderError(f"provider raised unhandled exception: {exc!r}") from exc
 
         data = _parse_provider_json(response.content)

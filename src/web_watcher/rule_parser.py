@@ -23,7 +23,7 @@ class RuleParser:
     def parse_yaml_str(cls, content: str) -> RuleSet:
         try:
             data = yaml.safe_load(content)
-        except Exception as e:
+        except yaml.YAMLError as e:
             raise RuleParseError(f"Malformed YAML content: {e}") from e
 
         if not isinstance(data, dict):

@@ -7,6 +7,8 @@ from requests.exceptions import RequestException, Timeout, ConnectionError, HTTP
 
 from .fetch import FetchResult, FetchStatus
 
+RequestError = RequestException
+
 
 def _fetch_with_playwright(
     url: str,
@@ -36,7 +38,7 @@ def _fetch_with_playwright(
             try:
                 import playwright
                 playwright_version = getattr(playwright, "__version__", None) or getattr(playwright.sync_api, "__version__", None) or "unknown"
-            except Exception:
+            except (ImportError, AttributeError, TypeError):
                 playwright_version = "unknown"
         metadata["playwright_version"] = playwright_version
     except ImportError as exc:
@@ -86,7 +88,7 @@ def _fetch_with_playwright(
                 error=None,
                 metadata=metadata,
             )
-    except Exception as exc:  # pragma: no cover - defensive fallback
+    except (RequestException, Timeout, ConnectionError, HTTPError, ValueError, TypeError) as exc:  # pragma: no cover - defensive fallback
         return FetchResult(
             target_key="",
             status=FetchStatus.NETWORK_ERROR,

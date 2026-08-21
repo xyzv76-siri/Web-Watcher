@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -21,7 +22,7 @@ from .repository import Repository
 from .doctor import SystemDoctor
 from .retention import RetentionManager, RetentionPolicy
 from .config import get_config, AppConfig
-from .rule_parser import RuleParser
+from .rule_parser import RuleParser, RuleParseError
 from .rule_evaluator import RuleEvaluator
 from .rule_models import WatcherRule
 from .presets import get_preset, list_presets
@@ -162,7 +163,7 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
                 )
                 repo.connection.commit()
                 retry_count += 1
-            except Exception as e:
+            except sqlite3.Error as e:
                 print(f"Failed to retry notification {n.id}: {e}")
 
         print(f"Retried {retry_count} notification(s). Run 'notify --once' to dispatch them.")
@@ -539,7 +540,7 @@ def handle_doctor(args: argparse.Namespace, config: AppConfig) -> int:
     repo = None
     try:
         repo = Repository(db_path)
-    except Exception:
+    except (sqlite3.Error, ValueError, OSError):
         pass
 
     doctor = SystemDoctor(repo=repo, db_path=db_path, config=config)
@@ -587,7 +588,7 @@ def handle_retention(args: argparse.Namespace, config: AppConfig) -> int:
 def handle_test_rule(args: argparse.Namespace) -> int:
     try:
         ruleset = RuleParser.parse_file(args.rule_file)
-    except Exception as e:
+    except (RuleParseError, FileNotFoundError, yaml.YAMLError) as e:
         print(f"[ERROR] Failed to parse rule file: {e}")
         return 1
 
@@ -625,7 +626,7 @@ def _truncate(text: str, limit: int = 200) -> str:
 def handle_inspect(args: argparse.Namespace) -> int:
     try:
         ruleset = RuleParser.parse_file(args.rule)
-    except Exception as e:
+    except (RuleParseError, FileNotFoundError, yaml.YAMLError) as e:
         print(f"[ERROR] Failed to parse rule file: {e}")
         return 1
 
@@ -998,7 +999,7 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
 
     try:
         ruleset = RuleParser.parse_file(path)
-    except Exception as e:
+    except (RuleParseError, FileNotFoundError, yaml.YAMLError) as e:
         print(f"[ERROR] Failed to parse rules file: {e}")
         return 1
 
@@ -1072,7 +1073,7 @@ def handle_rules(args: argparse.Namespace, config: AppConfig) -> int:
             path.write_text(yaml.dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False), encoding="utf-8")
             print(f"[OK] Rule '{rule_id}' status set to '{new_status}'.")
             return 0
-        except Exception as e:
+        except (OSError, yaml.YAMLError) as e:
             print(f"[ERROR] Failed to update rules file: {e}")
             return 1
 
@@ -1361,7 +1362,7 @@ def handle_cross_target(args: argparse.Namespace, config: AppConfig) -> int:
             if row["metadata_json"]:
                 try:
                     meta = json.loads(row["metadata_json"]) or {}
-                except Exception:
+                except json.JSONDecodeError:
                     pass
             rule_name = meta.get("rule_name", "")
             entity_ids = meta.get("entity_ids", [])

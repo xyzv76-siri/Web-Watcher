@@ -77,7 +77,7 @@ class SystemDoctor:
                 message=f"SQLite healthy (journal_mode: {journal_mode}, latency: {elapsed_ms:.2f}ms)",
                 details={"journal_mode": journal_mode, "latency_ms": round(elapsed_ms, 3)},
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Database Connection",
                 status="FAIL",
@@ -112,7 +112,7 @@ class SystemDoctor:
                 message=f"Schema version: {version}",
                 details={"version": version},
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Schema Version",
                 status="FAIL",
@@ -160,7 +160,7 @@ class SystemDoctor:
                 message=f"All {len(required)} required tables present",
                 details={"tables": sorted(required)},
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Required Tables",
                 status="FAIL",
@@ -220,7 +220,7 @@ class SystemDoctor:
                 status="PASS",
                 message="All required columns present",
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Required Columns",
                 status="FAIL",
@@ -266,7 +266,7 @@ class SystemDoctor:
                 status="PASS",
                 message=f"All {len(required_indexes)} required indexes present",
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Indexes",
                 status="FAIL",
@@ -346,7 +346,7 @@ class SystemDoctor:
                 status="PASS",
                 message="All stored enum values are within allowed vocabulary",
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Vocabulary",
                 status="FAIL",
@@ -467,7 +467,7 @@ class SystemDoctor:
                 message="Runtime state counts within normal bounds",
                 details=details,
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Runtime State",
                 status="FAIL",
@@ -554,7 +554,7 @@ class SystemDoctor:
                         (self._iso(datetime.now(timezone.utc)),),
                     )
                     stale_leases = cursor.fetchone()[0]
-            except Exception:
+            except sqlite3.Error:
                 stale_leases = 0
 
             conn.close()
@@ -593,7 +593,7 @@ class SystemDoctor:
                 status="PASS",
                 message="No pipeline health issues detected",
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Pipeline Health",
                 status="FAIL",
@@ -624,7 +624,7 @@ class SystemDoctor:
                 message="Metrics snapshot available",
                 details={"snapshot": snapshot},
             )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             return DiagnosticResult(
                 name="Metrics",
                 status="FAIL",
