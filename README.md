@@ -146,6 +146,33 @@ python -m web_watcher.cli template apply status_page --url https://status.exampl
 python -m web_watcher.cli template apply changelog --url https://github.com/owner/repo/blob/main/CHANGELOG.md
 ```
 
+### 按标签分组巡检
+
+模板生成的规则自带默认标签，可直接用于分组管理：
+
+```bash
+# 查看所有规则及其标签
+python -m web_watcher.cli rules list
+
+# 查看所有目标及其标签
+python -m web_watcher.cli targets list
+
+# 按标签筛选目标
+python -m web_watcher.cli targets list --tag price
+python -m web_watcher.cli targets list --tag status --tag ops
+```
+
+手动编辑 `rules.yaml` 也可添加标签：
+
+```yaml
+- id: product_page
+  name: Product Monitor
+  tags:
+    - product
+    - price
+    - ecommerce
+```
+
 ### 监控目标
 
 * **通用网页** — CSS/XPath 提取、内容规范化、规范指纹、动态噪声抑制。
