@@ -322,4 +322,6 @@ MIT License. See [LICENSE](LICENSE) for details.
 ### v1.0.6 — 2026-08-21
 
 - **Web UI v1** — 新增 `webui` CLI 子命令，启动轻量本地监控台（默认 `127.0.0.1:8080`）。默认仅本机可访问；如需远程访问，请通过 SSH 隧道或反向代理暴露，不要直接将 `--host 0.0.0.0` 暴露到公网。基于 Python 标准库 `http.server`，零外部依赖；页面包括仪表盘 `/`、目标列表 `/targets`、事件详情 `/events/<id>`；JSON API 包括 `/api/targets`、`/api/events`（分页/过滤）、`/api/events/<id>`（含 signals）、`/api/stats`。
+- **代码质量修复** — 移除 `webui.py` 中重复的 `WebUIServer` 类定义块与未使用的 `_allowed_origins` 死代码；统一版本号至 1.0.6；重建 `CAPABILITY_AUDIT_2026-08-21.md` 以反映当前代码真实状态。
+- **测试与文档** — 修复 `test_notification_stats.py` 的 `DeprecationWarning`；将已完成的 DESIGN 文档移入 `docs/archive/`；新增 `.pre-commit-config.yaml` 与重复类定义检测脚本。
 - **Ground Truth** — 全量测试 **1540 passed**（含 9 个新增 Web UI 测试）。
