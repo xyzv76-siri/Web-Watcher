@@ -6,7 +6,7 @@ from web_watcher.rule_models import WatcherRule
 
 def test_list_presets_returns_all():
     presets = list_presets()
-    assert len(presets) == 8
+    assert len(presets) == 9
     names = {p.name for p in presets}
     assert "GitHub Release" in names
     assert "Blog Post" in names

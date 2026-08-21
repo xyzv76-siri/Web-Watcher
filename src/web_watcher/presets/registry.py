@@ -432,6 +432,32 @@ def _build_changelog(url: str, **overrides: Any) -> WatcherRule:
     )
 
 
+def _build_rss_feed(url: str, **overrides: Any) -> WatcherRule:
+    """Build a rule for monitoring an RSS/Atom feed for new entries."""
+    interval = overrides.get("interval") or "30m"
+    channel = overrides.get("channel") or "console"
+    cooldown = overrides.get("cooldown") or "300s"
+    rule_id = overrides.get("rule_id") or "rss_feed"
+    name = overrides.get("name") or "RSS Feed Monitor"
+
+    return WatcherRule(
+        id=rule_id,
+        name=name,
+        target=TargetConfig(
+            url=url,
+            interval=interval,
+            timeout=10.0,
+        ),
+        extractors=[],
+        triggers=[],
+        routing=RoutingConfig(
+            channels=[channel],
+            cooldown=cooldown,
+        ),
+        tags=overrides.get("tags", ["rss", "feed"]),
+    )
+
+
 # Registry
 
 PRESETS: Dict[str, PresetDefinition] = {
@@ -474,6 +500,11 @@ PRESETS: Dict[str, PresetDefinition] = {
         name="Changelog",
         description="Monitor a project changelog or release notes for new versions.",
         build_rule=_build_changelog,
+    ),
+    "rss_feed": PresetDefinition(
+        name="RSS Feed",
+        description="Monitor an RSS/Atom feed for new entries.",
+        build_rule=_build_rss_feed,
     ),
 }
 

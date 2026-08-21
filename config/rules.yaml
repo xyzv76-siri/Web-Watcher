@@ -1,0 +1,19 @@
+version: "1.0"
+rules:
+  - id: example
+    name: Example
+    target:
+      url: https://example.com
+      interval: 3600
+    extractors:
+      - name: main
+        selector_type: css
+        selector: "body"
+    triggers:
+      - type: content_changed
+        field: body
+        importance: high
+    routing:
+      channels: [console]
+      cooldown: 86400
+    status: active

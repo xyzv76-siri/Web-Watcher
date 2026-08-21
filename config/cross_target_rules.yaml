@@ -1,0 +1,9 @@
+version: "1.0"
+cross_target_rules:
+  - name: correlated
+    entity_ids:
+      - repo_a
+      - repo_b
+    window_seconds: 3600
+    min_signals: 2
+    importance_boost: high

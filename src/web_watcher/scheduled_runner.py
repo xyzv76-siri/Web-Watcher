@@ -2,7 +2,7 @@ import os
 import logging
 import socket
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Tuple
 
 from web_watcher.repository import Repository
@@ -12,6 +12,7 @@ from web_watcher.fetcher import SmartFetcher
 from web_watcher.fetch_policy import FetchPolicy
 from web_watcher.generic_web_target import GenericWebTarget
 from web_watcher.github_target import GitHubTarget
+from web_watcher.rss_feed_target import RSSFeedTarget
 from web_watcher.rule_parser import RuleParser
 from web_watcher.rule_models import RuleSet, WatcherRule
 from web_watcher.signal_types import SignalType
@@ -21,6 +22,12 @@ try:
 except ImportError:
     EventCorrelator = None
     CorrelationPlan = None
+
+try:
+    from web_watcher.cross_target_correlator import CrossTargetRule, CrossTargetCorrelator
+except ImportError:
+    CrossTargetRule = None
+    CrossTargetCorrelator = None
 
 try:
     from web_watcher.models import Signal
@@ -77,6 +84,25 @@ class ScheduledRunner:
                 self.registry = RuleRegistry(self.repo)
             except Exception:
                 self.registry = None
+
+        self.cross_target_correlator = None
+        self._cross_target_rules_path = getattr(self.config, "cross_target_rules_path", None) or "config/cross_target_rules.yaml"
+        self._last_cross_target_rules_mtime: Optional[float] = None
+        try:
+            rules = self._load_cross_target_rules_from_yaml(self._cross_target_rules_path)
+            self.cross_target_correlator = CrossTargetCorrelator(rules=rules)
+            p = Path(self._cross_target_rules_path)
+            if p.exists():
+                self._last_cross_target_rules_mtime = p.stat().st_mtime
+        except FileNotFoundError:
+            # Only tolerate missing file when the path is the default fallback
+            # and the user did not explicitly configure cross_target_rules_path.
+            if getattr(self.config, "cross_target_rules_path", None):
+                raise
+            self.cross_target_correlator = None
+        except Exception:
+            # Any other validation/parse error must not be silenced.
+            raise
 
     def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
         if not self.metrics:
@@ -264,12 +290,88 @@ class ScheduledRunner:
 
         return synced_targets
 
+    def _load_cross_target_rules_from_yaml(self, path: Optional[Union[str, Path]] = None) -> List[CrossTargetRule]:
+        """Load cross_target rules from YAML file top-level `cross_target_rules` section.
+
+        Raises:
+            FileNotFoundError: If the rules file does not exist.
+            ValueError: If the YAML structure or rule content is invalid.
+        """
+        p = Path(path or self.rules_path or "")
+        if not p.exists():
+            raise FileNotFoundError(f"Cross-target rules file not found: {p}")
+        try:
+            import yaml
+            data = yaml.safe_load(p.read_bytes())
+        except Exception as exc:
+            raise ValueError(f"Invalid cross_target rules YAML: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise ValueError("Cross-target rules file must be a mapping at top level")
+        if "version" not in data:
+            raise ValueError("Cross-target rules file missing required 'version' field")
+        if "cross_target_rules" not in data:
+            raise ValueError("Cross-target rules file missing 'cross_target_rules' section")
+
+        raw = data.get("cross_target_rules")
+        if not isinstance(raw, list):
+            raise TypeError("'cross_target_rules' must be a list")
+
+        rules: List[CrossTargetRule] = []
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"Rule at index {idx} must be a mapping")
+            if not item.get("name"):
+                raise ValueError(f"Rule at index {idx} missing required 'name'")
+            if not item.get("entity_ids"):
+                raise ValueError(f"Rule '{item.get('name')}' missing required 'entity_ids'")
+            try:
+                rules.append(CrossTargetRule(
+                    name=item.get("name", "unnamed"),
+                    entity_ids=list(item.get("entity_ids", [])),
+                    window_seconds=int(item.get("window_seconds", 3600)),
+                    min_signals=int(item.get("min_signals", 2)),
+                    importance_boost=item.get("importance_boost", "important"),
+                ))
+            except Exception as exc:
+                raise ValueError(f"Invalid rule '{item.get('name')}': {exc}") from exc
+        return rules
+
+    def reload_cross_target_rules(self, path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+        """Reload cross_target rules from YAML and update correlator.
+
+        If the new configuration is invalid, the existing active rules are kept
+        and the returned dict contains an ``error`` field.
+        """
+        target_path = Path(path or self._cross_target_rules_path)
+        previous_rules = list(self.cross_target_correlator.rules) if self.cross_target_correlator is not None else []
+        try:
+            new_rules = self._load_cross_target_rules_from_yaml(target_path)
+        except Exception as exc:
+            return {
+                "reloaded": 0,
+                "error": str(exc),
+                "path": str(target_path),
+                "kept_previous_rules": len(previous_rules),
+            }
+        self.cross_target_correlator = CrossTargetCorrelator(rules=new_rules)
+        if target_path.exists():
+            self._last_cross_target_rules_mtime = target_path.stat().st_mtime
+        return {"reloaded": len(new_rules)}
+
     def _resolve_adapter(self, target: Target, rule: Optional[WatcherRule] = None):
         url_lower = target.url.lower()
         is_github = (
             "github.com" in url_lower
             or "api.github.com" in url_lower
             or (not url_lower.startswith("http") and "/" in url_lower and not url_lower.startswith("."))
+        )
+        is_feed = (
+            url_lower.endswith(".rss")
+            or url_lower.endswith(".atom")
+            or url_lower.endswith(".xml")
+            or "/feed" in url_lower
+            or "feed" in target.metadata.get("target_type", "")
         )
         rule_status = getattr(rule, "status", "enabled") if rule else "enabled"
 
@@ -281,6 +383,17 @@ class ScheduledRunner:
                 watch_types=watch_types,
                 token=token,
                 timeout=rule.target.timeout if rule else 10.0,
+                rule_status=rule_status,
+            )
+        elif is_feed:
+            custom_headers = (rule.target.headers if rule else None) or target.metadata.get("headers", {})
+            timeout = rule.target.timeout if rule else 10.0
+            noise_reduction_level = getattr(self.config, "noise_reduction_level", "standard")
+            return RSSFeedTarget(
+                target=target,
+                custom_headers=custom_headers,
+                timeout=timeout,
+                noise_reduction_level=noise_reduction_level,
                 rule_status=rule_status,
             )
         else:
@@ -458,6 +571,21 @@ class ScheduledRunner:
                     f"in {reload_stats.get('elapsed_seconds', 0)}s"
                 )
 
+        # 1.01 Hot reload cross_target rules if changed
+        if self._cross_target_rules_path:
+            try:
+                p = Path(self._cross_target_rules_path)
+                current_mtime = p.stat().st_mtime if p.exists() else None
+                if current_mtime is not None and self._last_cross_target_rules_mtime is not None:
+                    if current_mtime != self._last_cross_target_rules_mtime:
+                        logger.info("Cross-target rules changed, reloading")
+                        self.reload_cross_target_rules(self._cross_target_rules_path)
+                        self._last_cross_target_rules_mtime = current_mtime
+                elif current_mtime is not None and self._last_cross_target_rules_mtime is None:
+                    self._last_cross_target_rules_mtime = current_mtime
+            except Exception as exc:
+                logger.warning(f"Cross-target rules hot reload failed: {exc}")
+
         # 1. 自动同步 YAML 规则
         if self.rules_path:
             self.sync_rules(self.rules_path)
@@ -628,7 +756,253 @@ class ScheduledRunner:
                     except Exception:
                         pass
 
-        # 4. 自动外发通知
+        # 4. Cross-target correlation
+        cross_target_groups: List[Any] = []
+        if self.cross_target_correlator is not None and self.repo is not None:
+            try:
+                cutoff = now - timedelta(minutes=10)
+                signals = self.repo.list_signals(created_after=cutoff, created_before=now, limit=1000)
+                signal_tuples = []
+                for s in signals:
+                    sig_type = s.signal_type.value if hasattr(s.signal_type, "value") else str(s.signal_type)
+                    signal_tuples.append((s.entity_id, sig_type, s.observed_at, s.value or "", s.fingerprint or "", None, s.id))
+                cross_target_groups = self.cross_target_correlator.evaluate_signals(signal_tuples, now=now)
+                for group in cross_target_groups:
+                    try:
+                        entity_key = f"cross_target:{group.rule_name}:{'-'.join(sorted(group.entity_ids))}"
+                        entity = self.repo.get_or_create_entity(
+                            canonical_key=entity_key,
+                            name=group.rule_name,
+                            entity_type="cross_target",
+                        )
+
+                        # Dedup/merge: find the most recent open cross_target event for this entity
+                        existing_event = self.repo.find_open_event_for_entity(
+                            entity_id=entity.id,
+                            cutoff=now - timedelta(hours=24),
+                            event_type="cross_target",
+                        )
+
+                        if existing_event is not None:
+                            existing_meta = {}
+                            row = self.repo.connection.execute(
+                                "SELECT metadata_json FROM events WHERE id = ?",
+                                (existing_event.id,),
+                            ).fetchone()
+                            if row and row["metadata_json"]:
+                                import json as _json
+                                existing_meta = _json.loads(row["metadata_json"]) or {}
+
+                            existing_window_end = existing_meta.get("window_end")
+                            if existing_window_end:
+                                try:
+                                    existing_end = datetime.fromisoformat(existing_window_end)
+                                    if group.window_start <= existing_end + timedelta(minutes=10):
+                                        # Merge into existing event
+                                        merged_entity_ids = list(set(existing_meta.get("entity_ids", []) + list(group.entity_ids)))
+                                        merged_signal_count = int(existing_meta.get("signal_count", 0)) + len(group.signals)
+                                        merged_metadata = dict(existing_meta)
+                                        merged_metadata.update({
+                                            "entity_ids": merged_entity_ids,
+                                            "signal_count": merged_signal_count,
+                                            "window_start": min(
+                                                datetime.fromisoformat(existing_meta.get("window_start", group.window_start.isoformat())),
+                                                group.window_start,
+                                            ).isoformat(),
+                                            "window_end": max(
+                                                datetime.fromisoformat(existing_meta.get("window_end", group.window_end.isoformat())),
+                                                group.window_end,
+                                            ).isoformat(),
+                                            "source": "signal_based",
+                                            "correlation_type": "signal_based",
+                                        })
+                                        self.repo.connection.execute(
+                                            "UPDATE events SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                                            (
+                                                json.dumps(merged_metadata, default=str),
+                                                now.isoformat(),
+                                                existing_event.id,
+                                            ),
+                                        )
+                                        self.repo.connection.commit()
+                                        for sig in group.signals:
+                                            if sig.signal_id is not None:
+                                                self.repo.attach_signal_to_event(existing_event.id, sig.signal_id)
+                                        event = existing_event
+                                    else:
+                                        event = self.repo.create_event(
+                                            entity_id=entity.id,
+                                            event_type="cross_target",
+                                            status="open",
+                                            importance=group.importance,
+                                            created_at=now,
+                                            metadata={
+                                                "rule_name": group.rule_name,
+                                                "entity_ids": list(group.entity_ids),
+                                                "signal_count": len(group.signals),
+                                                "window_start": group.window_start.isoformat(),
+                                                "window_end": group.window_end.isoformat(),
+                                                "source": "signal_based",
+                                                "correlation_type": "signal_based",
+                                            },
+                                        )
+                                        for sig in group.signals:
+                                            if sig.signal_id is not None:
+                                                self.repo.attach_signal_to_event(event.id, sig.signal_id)
+                                except Exception:
+                                    event = self.repo.create_event(
+                                        entity_id=entity.id,
+                                        event_type="cross_target",
+                                        status="open",
+                                        importance=group.importance,
+                                        created_at=now,
+                                        metadata={
+                                            "rule_name": group.rule_name,
+                                            "entity_ids": list(group.entity_ids),
+                                            "signal_count": len(group.signals),
+                                            "window_start": group.window_start.isoformat(),
+                                            "window_end": group.window_end.isoformat(),
+                                            "source": "signal_based",
+                                            "correlation_type": "signal_based",
+                                        },
+                                    )
+                                    for sig in group.signals:
+                                        if sig.signal_id is not None:
+                                            self.repo.attach_signal_to_event(event.id, sig.signal_id)
+                            else:
+                                event = self.repo.create_event(
+                                    entity_id=entity.id,
+                                    event_type="cross_target",
+                                    status="open",
+                                    importance=group.importance,
+                                    created_at=now,
+                                    metadata={
+                                        "rule_name": group.rule_name,
+                                        "entity_ids": list(group.entity_ids),
+                                        "signal_count": len(group.signals),
+                                        "window_start": group.window_start.isoformat(),
+                                        "window_end": group.window_end.isoformat(),
+                                        "source": "signal_based",
+                                        "correlation_type": "signal_based",
+                                    },
+                                )
+                                for sig in group.signals:
+                                    if sig.signal_id is not None:
+                                        self.repo.attach_signal_to_event(event.id, sig.signal_id)
+                        else:
+                            event = self.repo.create_event(
+                                entity_id=entity.id,
+                                event_type="cross_target",
+                                status="open",
+                                importance=group.importance,
+                                created_at=now,
+                                metadata={
+                                    "rule_name": group.rule_name,
+                                    "entity_ids": list(group.entity_ids),
+                                    "signal_count": len(group.signals),
+                                    "window_start": group.window_start.isoformat(),
+                                    "window_end": group.window_end.isoformat(),
+                                    "source": "signal_based",
+                                    "correlation_type": "signal_based",
+                                },
+                            )
+                            for sig in group.signals:
+                                if sig.signal_id is not None:
+                                    self.repo.attach_signal_to_event(event.id, sig.signal_id)
+
+                        channels = ["console"]
+                        if getattr(self.config, "webhook_url", None):
+                            channels.append("webhook")
+                        if getattr(self.config, "smtp_host", None):
+                            channels.append("email")
+
+                        for ch in channels:
+                            try:
+                                self.repo.create_notification(
+                                    event_id=event.id,
+                                    channel=ch,
+                                    status="pending",
+                                    payload={
+                                        "rule_name": group.rule_name,
+                                        "entity_ids": list(group.entity_ids),
+                                        "signal_count": len(group.signals),
+                                        "importance": group.importance,
+                                        "window_start": group.window_start.isoformat(),
+                                        "window_end": group.window_end.isoformat(),
+                                        "has_investigation": False,
+                                    },
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning(f"Cross-target correlation failed: {exc}")
+
+        # 4.1 Event-based cross-target correlation
+        if self.cross_target_correlator is not None and self.repo is not None:
+            try:
+                event_cutoff = now - timedelta(hours=24)
+                rows = self.repo.connection.execute(
+                    """
+                    SELECT e.id, e.entity_id, e.event_type, e.status, e.created_at, e.updated_at
+                    FROM events e
+                    WHERE e.event_type = ? AND e.created_at >= ?
+                    ORDER BY e.created_at DESC
+                    LIMIT 500
+                    """,
+                    ("cross_target", event_cutoff.isoformat()),
+                ).fetchall()
+                event_tuples = []
+                for r in rows:
+                    event_tuples.append((r["id"], r["entity_id"], r["event_type"], r["status"], datetime.fromisoformat(r["created_at"]), datetime.fromisoformat(r["updated_at"])))
+                event_groups = self.cross_target_correlator.evaluate_events(event_tuples, now=now)
+                for group in event_groups:
+                    try:
+                        entity_key = f"cross_target_event:{group.rule_name}:{'-'.join(sorted(group.entity_ids))}"
+                        entity = self.repo.get_or_create_entity(
+                            canonical_key=entity_key,
+                            name=group.rule_name,
+                            entity_type="cross_target",
+                        )
+                        source_event_ids = [sig.event_id for sig in group.signals if sig.event_id is not None]
+                        event = self.repo.create_event(
+                            entity_id=entity.id,
+                            event_type="cross_target",
+                            status="open",
+                            importance=group.importance,
+                            created_at=now,
+                            metadata={
+                                "rule_name": group.rule_name,
+                                "entity_ids": list(group.entity_ids),
+                                "signal_count": len(group.signals),
+                                "window_start": group.window_start.isoformat(),
+                                "window_end": group.window_end.isoformat(),
+                                "source": "event_based",
+                                "event_ids": source_event_ids,
+                                "correlation_type": "event_based",
+                            },
+                        )
+                        self.repo.create_notification(
+                            event_id=event.id,
+                            channel="console",
+                            status="pending",
+                            payload={
+                                "rule_name": group.rule_name,
+                                "entity_ids": list(group.entity_ids),
+                                "signal_count": len(group.signals),
+                                "importance": group.importance,
+                                "window_start": group.window_start.isoformat(),
+                                "window_end": group.window_end.isoformat(),
+                                "has_investigation": False,
+                            },
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning(f"Event-based cross-target correlation failed: {exc}")
+
+        # 5. 自动外发通知
         if auto_deliver and self.repo and NotificationDispatcher:
             try:
                 dispatcher = NotificationDispatcher(repository=self.repo, config=self.config)

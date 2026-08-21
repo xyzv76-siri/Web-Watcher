@@ -401,6 +401,47 @@ class Repository:
             ).fetchone()
         return int(row["cnt"]) if row else 0
 
+    def list_signals(
+        self,
+        entity_id: Optional[int] = None,
+        signal_type: Optional[Union[SignalType, str]] = None,
+        created_after: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> list[Signal]:
+        """List signals with optional filters."""
+        query = "SELECT id, entity_id, signal_type, observed_at, value, fingerprint, created_at FROM signals WHERE 1=1"
+        params = []
+        if entity_id is not None:
+            query += " AND entity_id = ?"
+            params.append(entity_id)
+        if signal_type is not None:
+            db_type = _normalize_signal_type(signal_type)
+            if db_type is not None:
+                query += " AND signal_type = ?"
+                params.append(db_type)
+        if created_after is not None:
+            query += " AND created_at >= ?"
+            params.append(created_after.isoformat())
+        if created_before is not None:
+            query += " AND created_at <= ?"
+            params.append(created_before.isoformat())
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self.connection.execute(query, params).fetchall()
+        return [
+            Signal(
+                id=r["id"],
+                entity_id=r["entity_id"],
+                signal_type=_signal_type_from_db(r["signal_type"]),
+                observed_at=_parse_iso_datetime(r["observed_at"]) or _fallback_datetime(),
+                value=r["value"],
+                fingerprint=r["fingerprint"],
+            )
+            for r in rows
+        ]
+
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------

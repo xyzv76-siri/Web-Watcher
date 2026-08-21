@@ -18,6 +18,7 @@ class AppConfig:
     retention_max_age_days: int = 30
     retention_dry_run: bool = False
     noise_reduction_level: str = "standard"
+    cross_target_rules_path: Optional[str] = None
 
 
 def get_config() -> AppConfig:
@@ -34,4 +35,5 @@ def get_config() -> AppConfig:
         retention_max_age_days=int(os.getenv("WEB_WATCHER_RETENTION_MAX_AGE_DAYS", "30")),
         retention_dry_run=os.getenv("WEB_WATCHER_RETENTION_DRY_RUN", "false").lower() in ("1", "true", "yes"),
         noise_reduction_level=os.getenv("WEB_WATCHER_NOISE_REDUCTION_LEVEL", "standard"),
+        cross_target_rules_path=os.getenv("WEB_WATCHER_CROSS_TARGET_RULES_PATH"),
     )

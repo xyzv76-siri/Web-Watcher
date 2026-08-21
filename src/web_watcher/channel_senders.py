@@ -4,8 +4,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
 import logging
+import smtplib
 import urllib.error
 import urllib.request
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Any, Dict, Optional
 
 from .models import Notification
@@ -196,5 +199,86 @@ class DingTalkSender(WebhookSender):
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
         except urllib.error.HTTPError as exc:
             return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+
+class EmailSender(BaseChannelSender):
+    """Delivers notifications via SMTP email."""
+
+    def __init__(
+        self,
+        smtp_host: str = "localhost",
+        smtp_port: int = 25,
+        smtp_user: Optional[str] = None,
+        smtp_password: Optional[str] = None,
+        use_tls: bool = False,
+        use_ssl: bool = False,
+        from_addr: Optional[str] = None,
+        to_addrs: Optional[list[str]] = None,
+    ):
+        self.smtp_host = smtp_host
+        self.smtp_port = smtp_port
+        self.smtp_user = smtp_user
+        self.smtp_password = smtp_password
+        self.use_tls = use_tls
+        self.use_ssl = use_ssl
+        self.from_addr = from_addr or smtp_user or "web-watcher@localhost"
+        self.to_addrs = to_addrs or []
+
+    def _build_message(self, notification: Notification) -> MIMEMultipart:
+        payload = notification.payload or {}
+        event_type = payload.get("event_type", "unknown")
+        importance = payload.get("importance", "normal").upper()
+        subject = f"[{importance}] Web-Watcher: {event_type}"
+
+        body_lines = [
+            f"Event: {event_type}",
+            f"Notification ID: {notification.id}",
+            f"Event ID: {notification.event_id}",
+            f"Channel: {notification.channel}",
+            f"Status: {notification.status}",
+            f"Created At: {notification.created_at}",
+            "",
+        ]
+        if payload.get("has_investigation"):
+            inv = payload.get("investigation", {})
+            body_lines.append(f"Investigation Summary: {inv.get('summary', 'N/A')}")
+            preview = inv.get("evidence_preview", [])
+            if preview:
+                body_lines.append("Evidence Highlights:")
+                for item in preview:
+                    evidence_type = item.get("evidence_type")
+                    payload_data = item.get("payload", {})
+                    body_lines.append(f"- [{evidence_type}] {json.dumps(payload_data)}")
+
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = self.from_addr
+        msg["To"] = ", ".join(self.to_addrs)
+        msg.attach(MIMEText("\n".join(body_lines), "plain", "utf-8"))
+        return msg
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        if not self.to_addrs:
+            return DeliveryResult(success=False, error_message="Email recipient addresses are not configured")
+
+        try:
+            msg = self._build_message(notification)
+            if self.use_ssl:
+                with smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, timeout=10) as server:
+                    if self.smtp_user and self.smtp_password:
+                        server.login(self.smtp_user, self.smtp_password)
+                    server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+            else:
+                with smtplib.SMTP(self.smtp_host, self.smtp_port, timeout=10) as server:
+                    if self.use_tls:
+                        server.starttls()
+                    if self.smtp_user and self.smtp_password:
+                        server.login(self.smtp_user, self.smtp_password)
+                    server.sendmail(self.from_addr, self.to_addrs, msg.as_string())
+            return DeliveryResult(success=True, status_code=250, response_body="Accepted")
+        except smtplib.SMTPException as exc:
+            return DeliveryResult(success=False, error_message=f"SMTPError: {str(exc)}")
         except Exception as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")

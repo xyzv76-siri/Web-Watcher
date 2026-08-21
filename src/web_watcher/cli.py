@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import yaml
 
-from .channel_senders import WebhookSender
+from .channel_senders import WebhookSender, EmailSender
 from .event_correlator import EventCorrelator
 from .exporter import AuditExporter, parse_since
 from .investigation_worker import InvestigationWorker
@@ -104,6 +104,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional webhook endpoint URL for webhook channel delivery",
     )
     notify_parser.add_argument(
+        "--smtp-host",
+        type=str,
+        default=None,
+        help="SMTP server host for email channel delivery",
+    )
+    notify_parser.add_argument(
+        "--smtp-port",
+        type=int,
+        default=25,
+        help="SMTP server port (default: 25)",
+    )
+    notify_parser.add_argument(
+        "--smtp-user",
+        type=str,
+        default=None,
+        help="SMTP authentication username",
+    )
+    notify_parser.add_argument(
+        "--smtp-password",
+        type=str,
+        default=None,
+        help="SMTP authentication password",
+    )
+    notify_parser.add_argument(
+        "--smtp-use-tls",
+        action="store_true",
+        help="Enable STARTTLS for SMTP",
+    )
+    notify_parser.add_argument(
+        "--smtp-use-ssl",
+        action="store_true",
+        help="Enable SSL/TLS for SMTP (implicit TLS)",
+    )
+    notify_parser.add_argument(
+        "--email-from",
+        type=str,
+        default=None,
+        help="From address for email notifications (default: smtp-user or web-watcher@localhost)",
+    )
+    notify_parser.add_argument(
+        "--email-to",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Recipient address(es) for email notifications",
+    )
+    notify_parser.add_argument(
         "--db",
         "--db-path",
         dest="db_path",
@@ -163,6 +210,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show notification delivery statistics",
     )
+
+    # 2.1 cross_target subcommand
+    cross_target_parser = subparsers.add_parser(
+        "cross-target",
+        help="View and manage cross-target groups, events, and rules",
+    )
+    cross_target_subparsers = cross_target_parser.add_subparsers(dest="cross_target_command", help="Cross-target commands")
+    ct_rules_parser = cross_target_subparsers.add_parser("rules", help="Show loaded cross_target rules")
+    ct_rules_parser.add_argument("--db", "--db-path", dest="db_path", type=str, default="web_watcher.db", help="Path to SQLite database")
+    ct_rules_parser.add_argument("--rules", dest="rules_path", type=str, default=None, help="Path to rules YAML")
+    ct_events_parser = cross_target_subparsers.add_parser("events", help="Show recent cross_target events")
+    ct_events_parser.add_argument("--db", "--db-path", dest="db_path", type=str, default="web_watcher.db", help="Path to SQLite database")
+    ct_events_parser.add_argument("--limit", type=int, default=20, help="Max events to show (default: 20)")
+    ct_events_parser.add_argument("--status", type=str, default=None, help="Filter by event status")
+    ct_events_parser.add_argument("--rule", type=str, default=None, help="Filter by rule name")
+    ct_events_parser.add_argument("--entity", type=str, default=None, help="Filter by entity id")
 
     # 3. run subcommand (pipeline execution)
     run_parser = subparsers.add_parser(
@@ -861,7 +924,12 @@ def handle_worker(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
-def _build_dispatcher(repo: Repository, webhook_url: Optional[str], config: AppConfig) -> NotificationDispatcher:
+def _build_dispatcher(
+    repo: Repository,
+    webhook_url: Optional[str],
+    config: AppConfig,
+    email_sender: Optional[EmailSender] = None,
+) -> NotificationDispatcher:
     dispatcher = NotificationDispatcher(
         repository=repo,
         max_retries=config.default_max_retries,
@@ -871,6 +939,8 @@ def _build_dispatcher(repo: Repository, webhook_url: Optional[str], config: AppC
     )
     if webhook_url:
         dispatcher.register_sender("webhook", WebhookSender(webhook_url=webhook_url))
+    if email_sender is not None:
+        dispatcher.register_sender("email", email_sender)
     return dispatcher
 
 
@@ -887,6 +957,19 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
     do_retry = getattr(args, "notify_retry", False)
     retry_limit = getattr(args, "notify_retry_limit", 10)
     show_stats = getattr(args, "notify_stats", False)
+
+    email_sender = None
+    if getattr(args, "smtp_host", None):
+        email_sender = EmailSender(
+            smtp_host=args.smtp_host,
+            smtp_port=getattr(args, "smtp_port", 25),
+            smtp_user=getattr(args, "smtp_user", None),
+            smtp_password=getattr(args, "smtp_password", None),
+            use_tls=getattr(args, "smtp_use_tls", False),
+            use_ssl=getattr(args, "smtp_use_ssl", False),
+            from_addr=getattr(args, "email_from", None),
+            to_addrs=getattr(args, "email_to", None) or [],
+        )
 
     repo = Repository(db_path)
 
@@ -915,7 +998,7 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
             print("No failed notifications to retry.")
             return 0
 
-        dispatcher = _build_dispatcher(repo, webhook_url, config)
+        dispatcher = _build_dispatcher(repo, webhook_url, config, email_sender=email_sender)
         retry_count = 0
         for n in pending:
             try:
@@ -957,7 +1040,7 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
         return 0
 
     # Default: run dispatcher
-    dispatcher = _build_dispatcher(repo, webhook_url, config)
+    dispatcher = _build_dispatcher(repo, webhook_url, config, email_sender=email_sender)
 
     if run_once:
         count = dispatcher.run_once()
@@ -1972,6 +2055,65 @@ def _yaml_list(items: List[str]) -> str:
     return "[" + ", ".join(items) + "]"
 
 
+def handle_cross_target(args: argparse.Namespace, config: AppConfig) -> int:
+    import json
+    from pathlib import Path
+    from web_watcher.repository import Repository
+    from web_watcher.scheduled_runner import ScheduledRunner
+
+    db_path = getattr(args, "db_path", None) or "web_watcher.db"
+    repo = Repository(db_path)
+    runner = ScheduledRunner(repo=repo, config=config, rules_path=getattr(args, "rules_path", None))
+
+    command = getattr(args, "cross_target_command", None)
+
+    if command == "rules":
+        path = Path(getattr(args, "rules_path", None) or os.getenv("WEB_WATCHER_RULES") or getattr(config, "rules_path", None) or "config/rules.yaml")
+        rules = runner._load_cross_target_rules_from_yaml(path)
+        print(f"Loaded {len(rules)} cross_target rule(s) from {path}")
+        for r in rules:
+            print(f"  - {r.name}: entities={r.entity_ids}, window={r.window_seconds}s, min_signals={r.min_signals}, importance={r.importance_boost}")
+        return 0
+
+    if command == "events":
+        limit = getattr(args, "limit", 20)
+        status_filter = getattr(args, "status", None)
+        rule_filter = getattr(args, "rule", None)
+        entity_filter = getattr(args, "entity", None)
+
+        rows = repo.connection.execute(
+            """
+            SELECT e.id, e.entity_id, e.event_type, e.status, e.importance, e.created_at, e.updated_at, e.metadata_json
+            FROM events e
+            WHERE e.event_type = ?
+            ORDER BY e.created_at DESC
+            LIMIT ?
+            """,
+            ("cross_target", limit),
+        ).fetchall()
+        print(f"Recent cross_target events (up to {limit}):")
+        for row in rows:
+            meta = {}
+            if row["metadata_json"]:
+                try:
+                    meta = json.loads(row["metadata_json"]) or {}
+                except Exception:
+                    pass
+            rule_name = meta.get("rule_name", "")
+            entity_ids = meta.get("entity_ids", [])
+            if status_filter and row["status"] != status_filter:
+                continue
+            if rule_filter and rule_name != rule_filter:
+                continue
+            if entity_filter and entity_filter not in [str(x) for x in entity_ids]:
+                continue
+            print(f"  event_id={row['id']} status={row['status']} importance={row['importance']} rule={rule_name} entities={entity_ids} created_at={row['created_at']}")
+        return 0
+
+    print("Usage: python -m web_watcher.cli cross-target {rules|events}")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -1981,6 +2123,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_worker(args, config)
     if args.command == "notify":
         return handle_notify(args, config)
+    if args.command == "cross-target":
+        return handle_cross_target(args, config)
     if args.command == "run":
         return handle_run(args, config)
     if args.command == "daemon":
