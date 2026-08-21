@@ -27,8 +27,8 @@ def test_build_parser_worker_custom_flags():
     assert args.db_path == ":memory:"
 
 
-@patch("web_watcher.cli.InvestigationWorker")
-@patch("web_watcher.cli.Repository")
+@patch("web_watcher.cli_handlers.InvestigationWorker")
+@patch("web_watcher.cli_handlers.Repository")
 def test_handle_worker_once_mode(mock_repo_cls, mock_worker_cls, capsys):
     mock_worker = MagicMock()
     mock_worker.run_once.return_value = 3
@@ -45,8 +45,8 @@ def test_handle_worker_once_mode(mock_repo_cls, mock_worker_cls, capsys):
     assert "Processed 3 event(s)" in captured.out
 
 
-@patch("web_watcher.cli.InvestigationWorker")
-@patch("web_watcher.cli.Repository")
+@patch("web_watcher.cli_handlers.InvestigationWorker")
+@patch("web_watcher.cli_handlers.Repository")
 def test_handle_worker_interrupt_handling(mock_repo_cls, mock_worker_cls, capsys):
     mock_worker = MagicMock()
     mock_worker.run_forever.side_effect = KeyboardInterrupt

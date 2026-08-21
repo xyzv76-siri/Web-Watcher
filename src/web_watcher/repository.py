@@ -17,6 +17,27 @@ from .signal_types import SignalType
 
 logger = logging.getLogger(__name__)
 
+from .repository_utils import (
+    utc_now,
+    utc_now_iso,
+    _parse_iso_datetime,
+    _fallback_datetime,
+    _serialize_datetime,
+    _signal_type_from_db,
+    _event_type_from_db,
+    _event_status_from_db,
+    _importance_from_db,
+    _enum_value,
+    _normalize_signal_type,
+    _normalize_event_type,
+    _normalize_event_status,
+    _normalize_importance,
+    _deserialize_signal_type,
+    _deserialize_event_type,
+    _deserialize_event_status,
+    _deserialize_importance,
+)
+
 
 @dataclass
 class Migration:
@@ -28,164 +49,6 @@ class Migration:
 
     def compute_checksum(self) -> str:
         return hashlib.sha256(self.name.encode("utf-8")).hexdigest()[:16]
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def utc_now_iso() -> str:
-    return utc_now().isoformat()
-
-
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _fallback_datetime() -> datetime:
-    return datetime.min.replace(tzinfo=timezone.utc)
-
-
-def _serialize_datetime(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat()
-
-
-def _signal_type_from_db(value: str) -> SignalType | str:
-    try:
-        return SignalType(value)
-    except ValueError:
-        return value
-
-
-def _event_type_from_db(value: str) -> EventType | str:
-    try:
-        return EventType(value)
-    except ValueError:
-        return value
-
-
-def _event_status_from_db(value: str) -> EventStatus | str:
-    try:
-        return EventStatus(value)
-    except ValueError:
-        return value
-
-
-def _importance_from_db(value: str) -> Importance | str:
-    try:
-        return Importance(value)
-    except ValueError:
-        return value
-
-
-def _enum_value(value):
-    return value.value if hasattr(value, "value") else value
-
-
-# --- Boundary Normalization Helpers ---
-
-def _normalize_signal_type(val: Union[SignalType, str, None]) -> Optional[str]:
-    if val is None:
-        return None
-    if isinstance(val, SignalType):
-        return val.value
-    if isinstance(val, str):
-        cleaned = val.strip().lower()
-        for member in SignalType:
-            if member.value == cleaned:
-                return member.value
-        upper_name = val.strip().upper()
-        if upper_name in SignalType.__members__:
-            return SignalType[upper_name].value
-        return cleaned
-    return str(val)
-
-
-def _normalize_event_type(val: Union[EventType, str, None]) -> Optional[str]:
-    if val is None:
-        return None
-    if isinstance(val, EventType):
-        return val.value
-    if isinstance(val, str):
-        cleaned = val.strip().lower()
-        for member in EventType:
-            if member.value == cleaned:
-                return member.value
-        upper_name = val.strip().upper()
-        if upper_name in EventType.__members__:
-            return EventType[upper_name].value
-        return cleaned
-    return str(val)
-
-
-def _normalize_event_status(val: Union[EventStatus, str, None]) -> Optional[str]:
-    if val is None:
-        return None
-    if isinstance(val, EventStatus):
-        return val.value
-    if isinstance(val, str):
-        cleaned = val.strip().lower()
-        if cleaned in (EventStatus.OPEN.value, "new"):
-            return EventStatus.OPEN.value
-        if cleaned in (EventStatus.CLOSED.value, "processed", "discarded"):
-            return EventStatus.CLOSED.value
-        return cleaned
-    return str(val)
-
-
-def _normalize_importance(val: Union[Importance, str, None]) -> Optional[str]:
-    if val is None:
-        return None
-    try:
-        return Importance.from_value(val).value
-    except (ValueError, KeyError, AttributeError):
-        return str(val).strip().lower()
-
-
-def _deserialize_signal_type(val: str) -> SignalType:
-    try:
-        return SignalType(val)
-    except ValueError:
-        cleaned = val.strip().lower()
-        for m in SignalType:
-            if m.value == cleaned:
-                return m
-        return SignalType.CONTENT_CHANGE
-
-
-def _deserialize_event_type(val: str) -> EventType:
-    try:
-        return EventType(val)
-    except ValueError:
-        cleaned = val.strip().lower()
-        for m in EventType:
-            if m.value == cleaned:
-                return m
-        return EventType.CONTENT_CHANGE
-
-
-def _deserialize_event_status(val: str) -> EventStatus:
-    try:
-        return EventStatus(val)
-    except ValueError:
-        norm = _normalize_event_status(val)
-        return EventStatus(norm) if norm in (EventStatus.OPEN.value, EventStatus.CLOSED.value) else EventStatus.OPEN
-
-
-def _deserialize_importance(val: str) -> Importance:
-    try:
-        return Importance.from_value(val)
-    except (ValueError, KeyError, AttributeError):
-        return Importance.INTERESTING
 
 
 SCHEMA_VERSION = 3
