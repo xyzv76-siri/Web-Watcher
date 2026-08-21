@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import socket
 from pathlib import Path
@@ -420,18 +421,26 @@ class ScheduledRunner:
             return sig
         if isinstance(sig, dict):
             try:
-                observed_at = sig.get("captured_at", datetime.now(timezone.utc))
+                observed_at = sig.get("captured_at") or sig.get("fetched_at") or sig.get("published_at") or sig.get("updated_at")
                 if isinstance(observed_at, str):
                     observed_at = datetime.fromisoformat(observed_at)
+                else:
+                    observed_at = observed_at or datetime.now(timezone.utc)
+                signal_type = sig.get("signal_type")
+                if signal_type is None:
+                    signal_type = SignalType.CONTENT_CHANGE.value
+                elif hasattr(signal_type, "value"):
+                    signal_type = signal_type.value
                 return Signal(
                     id=sig.get("id"),
                     entity_id=sig.get("target_id", target_id),
-                    signal_type=sig.get("signal_type", SignalType.CONTENT_CHANGE.value),
+                    signal_type=signal_type,
                     observed_at=observed_at,
-                    value=sig.get("extracted_values") or sig.get("content_hash") or "",
-                    fingerprint=sig.get("content_hash"),
+                    value=sig.get("value") or json.dumps(sig, ensure_ascii=False),
+                    fingerprint=sig.get("content_hash") or sig.get("fingerprint"),
                 )
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logger.debug("Signal normalization failed for %s: %s", target_id, exc)
                 return sig
         return sig
 

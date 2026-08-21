@@ -1,7 +1,7 @@
 import json
 from unittest.mock import MagicMock
 from datetime import datetime
-from web_watcher.models import Target, TargetStatus
+from web_watcher.models import Target, TargetStatus, Signal
 from web_watcher.fetch import FetchStatus
 from web_watcher.fetcher import SmartFetcher, FetchResult
 from web_watcher.github_target import GitHubTarget, parse_github_repo
@@ -46,7 +46,7 @@ def test_github_target_release_published_signal():
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["tag_name"] == "v2.1.0"
     assert payload["owner"] == "pallets"
     assert res.updated_metadata["last_release_tag"] == "v2.1.0"
@@ -93,7 +93,7 @@ def test_github_target_star_delta_signal():
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["delta"] == 1
     assert payload["new_stars"] == 3500
 
@@ -197,7 +197,7 @@ def test_github_target_mixed_watch_types_emits_both_signals():
 
     assert res.allowed is True
     assert len(res.signals_emitted) == 2
-    sigs = [s.payload if hasattr(s, "payload") else s for s in res.signals_emitted]
+    sigs = [json.loads(s.value) if isinstance(s, Signal) else s for s in res.signals_emitted]
     assert any(p.get("tag_name") == "v2.1.0" for p in sigs)
     assert any(p.get("new_stars") == 3500 for p in sigs)
 
@@ -241,7 +241,7 @@ def test_github_target_release_source_url_in_payload():
 
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["source"] == "https://api.github.com/repos/pallets/flask/releases/latest"
     assert payload["fetched_at"] is not None
 
@@ -264,7 +264,7 @@ def test_github_target_stars_source_url_in_payload():
 
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["source"] == "https://api.github.com/repos/pallets/flask"
     assert payload["fetched_at"] is not None
 
@@ -634,7 +634,7 @@ def test_github_target_commit_pushed_signal():
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["sha"] == "abc123def456789"
     assert res.updated_metadata["last_commit_sha"] == "abc123def456789"
 
@@ -662,7 +662,7 @@ def test_github_target_pr_status_changed_signal():
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["pr_number"] == "123"
     assert payload["state"] == "open"
     assert res.updated_metadata["last_pr_snapshot"]["state"] == "open"
@@ -691,7 +691,7 @@ def test_github_target_issue_updated_signal():
     assert res.allowed is True
     assert len(res.signals_emitted) == 1
     sig = res.signals_emitted[0]
-    payload = sig.payload if hasattr(sig, "payload") else sig
+    payload = json.loads(sig.value) if isinstance(sig, Signal) else sig
     assert payload["issue_number"] == "456"
     assert payload["state"] == "open"
     assert res.updated_metadata["last_issue_snapshot"]["state"] == "open"

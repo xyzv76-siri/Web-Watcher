@@ -111,17 +111,21 @@ class GitHubTarget:
                     id=f"sig_{self.target.id}_{signal_type.value}_{int(now.timestamp())}",
                     entity_id=self.target.id,
                     signal_type=signal_type,
-                    payload=payload,
-                    created_at=now,
+                    value=json.dumps(payload, ensure_ascii=False),
+                    observed_at=now,
+                    fingerprint=self._compute_signal_fingerprint(signal_type, payload),
                 )
-            except Exception:
+            except (TypeError, ValueError) as exc:
+                logger.debug("Signal construction failed for %s: %s", self.target.id, exc)
                 try:
                     return Signal(
                         entity_id=self.target.id,
                         signal_type=signal_type,
-                        payload=payload,
+                        value=json.dumps(payload, ensure_ascii=False),
+                        observed_at=now,
+                        fingerprint=self._compute_signal_fingerprint(signal_type, payload),
                     )
-                except Exception:
+                except (TypeError, ValueError):
                     return payload
         return payload
 
@@ -245,7 +249,7 @@ class GitHubTarget:
                     custom_headers=self._build_headers(rel_etag),
                     timeout=self.timeout,
                     cookies=cookies or None,
-                    auth=tuple(basic_auth) if basic_auth else None,
+                    auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                     proxy=proxy,
                 )
 
@@ -338,7 +342,7 @@ class GitHubTarget:
                     custom_headers=self._build_headers(repo_etag),
                     timeout=self.timeout,
                     cookies=cookies or None,
-                    auth=tuple(basic_auth) if basic_auth else None,
+                    auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                     proxy=proxy,
                 )
 
@@ -434,7 +438,7 @@ class GitHubTarget:
                     custom_headers=self._build_headers(commits_etag),
                     timeout=self.timeout,
                     cookies=cookies or None,
-                    auth=tuple(basic_auth) if basic_auth else None,
+                    auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                     proxy=proxy,
                 )
 
@@ -525,7 +529,7 @@ class GitHubTarget:
                     custom_headers=self._build_headers(prs_etag),
                     timeout=self.timeout,
                     cookies=cookies or None,
-                    auth=tuple(basic_auth) if basic_auth else None,
+                    auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                     proxy=proxy,
                 )
 

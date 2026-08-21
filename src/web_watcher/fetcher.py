@@ -8,6 +8,96 @@ from requests.exceptions import RequestException, Timeout, ConnectionError, HTTP
 from .fetch import FetchResult, FetchStatus
 
 
+def _fetch_with_playwright(
+    url: str,
+    timeout: float,
+    cookies: Optional[Dict[str, str]] = None,
+    proxy: Optional[str] = None,
+) -> FetchResult:
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    except ImportError as exc:
+        return FetchResult(
+            target_key="",
+            status=FetchStatus.INVALID_RESPONSE,
+            status_code=None,
+            fetched_at=datetime.now(timezone.utc),
+            content=None,
+            error=f"js_render requested but playwright is not installed: {exc}",
+            metadata={"renderer": "playwright_unavailable"},
+        )
+
+    metadata: Dict[str, Any] = {"renderer": "playwright"}
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+        try:
+            from playwright.sync_api import __version__ as playwright_version
+        except ImportError:
+            try:
+                import playwright
+                playwright_version = getattr(playwright, "__version__", None) or getattr(playwright.sync_api, "__version__", None) or "unknown"
+            except Exception:
+                playwright_version = "unknown"
+        metadata["playwright_version"] = playwright_version
+    except ImportError as exc:
+        return FetchResult(
+            target_key="",
+            status=FetchStatus.INVALID_RESPONSE,
+            status_code=None,
+            fetched_at=datetime.now(timezone.utc),
+            content=None,
+            error=f"js_render requested but playwright is not installed: {exc}",
+            metadata={"renderer": "playwright_unavailable"},
+        )
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="WebWatcher/1.0 (https://github.com/xyzv76-siri/Web-Watcher)",
+                proxy={"server": proxy} if proxy else None,
+            )
+            if cookies:
+                context.add_cookies([{"name": k, "value": v, "url": url} for k, v in cookies.items()])
+            page = context.new_page()
+            try:
+                page.goto(url, timeout=int(timeout * 1000), wait_until="domcontentloaded")
+                content = page.content()
+                status_code = 200
+            except PlaywrightTimeout:
+                browser.close()
+                return FetchResult(
+                    target_key="",
+                    status=FetchStatus.TIMEOUT,
+                    status_code=None,
+                    fetched_at=datetime.now(timezone.utc),
+                    content=None,
+                    error="Playwright navigation timeout",
+                    metadata=metadata,
+                )
+            browser.close()
+            return FetchResult(
+                target_key="",
+                status=FetchStatus.SUCCESS,
+                status_code=status_code,
+                fetched_at=datetime.now(timezone.utc),
+                content=content,
+                content_type="text/html",
+                error=None,
+                metadata=metadata,
+            )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        return FetchResult(
+            target_key="",
+            status=FetchStatus.NETWORK_ERROR,
+            status_code=None,
+            fetched_at=datetime.now(timezone.utc),
+            content=None,
+            error=f"Playwright error: {exc}",
+            metadata=metadata,
+        )
+
+
 class SmartFetcher:
     """Polite web fetcher with ETag/Last-Modified support and timeout handling."""
 
@@ -32,7 +122,10 @@ class SmartFetcher:
         cookies: Optional[Dict[str, str]] = None,
         auth: Optional[tuple] = None,
         proxy: Optional[str] = None,
+        js_render: bool = False,
     ) -> FetchResult:
+        if js_render:
+            return _fetch_with_playwright(url, timeout or self.default_timeout, cookies=cookies, proxy=proxy)
         timeout = timeout or self.default_timeout
         headers = dict(self.session.headers)
         if custom_headers:

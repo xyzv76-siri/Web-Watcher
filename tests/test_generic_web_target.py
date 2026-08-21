@@ -440,3 +440,107 @@ def test_generic_web_target_trigger_does_not_emit_signal_outside_window():
     assert res.allowed is True
     assert len(res.signals_emitted) == 0
     assert "Trigger conditions not met" in res.reason
+
+
+def test_generic_web_target_passes_cookies_to_fetcher():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_cookies",
+        url="https://example.com",
+        metadata={"cookies": {"session": "abc123", "theme": "dark"}},
+    )
+    adapter = GenericWebTarget(target=target)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_cookies",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V1,
+        etag='"etag-v1"',
+    )
+
+    adapter.execute(fetcher=mock_fetcher, now=now)
+
+    mock_fetcher.fetch.assert_called_once()
+    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+    assert call_kwargs["cookies"] == {"session": "abc123", "theme": "dark"}
+
+
+def test_generic_web_target_passes_basic_auth_to_fetcher():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_auth",
+        url="https://example.com",
+        metadata={"basic_auth": {"username": "user", "password": "pass"}},
+    )
+    adapter = GenericWebTarget(target=target)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_auth",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V1,
+        etag='"etag-v1"',
+    )
+
+    adapter.execute(fetcher=mock_fetcher, now=now)
+
+    mock_fetcher.fetch.assert_called_once()
+    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+    assert call_kwargs["auth"] == ("user", "pass")
+
+
+def test_generic_web_target_passes_proxy_to_fetcher():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_proxy",
+        url="https://example.com",
+        metadata={"proxy": "http://proxy.local:8080"},
+    )
+    adapter = GenericWebTarget(target=target)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_proxy",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V1,
+        etag='"etag-v1"',
+    )
+
+    adapter.execute(fetcher=mock_fetcher, now=now)
+
+    mock_fetcher.fetch.assert_called_once()
+    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+    assert call_kwargs["proxy"] == "http://proxy.local:8080"
+
+
+def test_generic_web_target_passes_js_render_to_fetcher():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_js",
+        url="https://example.com",
+        metadata={"js_render": True},
+    )
+    adapter = GenericWebTarget(target=target)
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_js",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SAMPLE_V1,
+        etag='"etag-v1"',
+    )
+
+    adapter.execute(fetcher=mock_fetcher, now=now)
+
+    mock_fetcher.fetch.assert_called_once()
+    call_kwargs = mock_fetcher.fetch.call_args.kwargs
+    assert call_kwargs["js_render"] is True

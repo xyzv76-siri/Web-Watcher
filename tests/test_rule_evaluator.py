@@ -137,3 +137,76 @@ def test_time_window_minutes_passes_without_timestamps():
     )
     result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00})
     assert result.is_triggered is True
+
+
+def test_evaluate_condition_group_and_operator():
+    rule = WatcherRule(
+        id="cg_and",
+        name="ConditionGroup AND",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[
+            TriggerConfig(
+                type="numeric_delta",
+                field="price",
+                condition="abs_delta > 0.01",
+                condition_group=[
+                    {"type": "numeric_delta", "condition": "new > 50"},
+                    {"type": "numeric_delta", "condition": "new < 200"},
+                ],
+                condition_operator="AND",
+                importance="important",
+            )
+        ],
+        routing=RoutingConfig(),
+    )
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00})
+    assert result.is_triggered is True
+    assert len(result.triggered_events) == 1
+
+
+def test_evaluate_condition_group_or_operator():
+    rule = WatcherRule(
+        id="cg_or",
+        name="ConditionGroup OR",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[
+            TriggerConfig(
+                type="numeric_delta",
+                field="price",
+                condition="abs_delta > 0.01",
+                condition_group=[
+                    {"type": "numeric_delta", "condition": "new < 50"},
+                    {"type": "numeric_delta", "condition": "new > 200"},
+                ],
+                condition_operator="OR",
+                importance="important",
+            )
+        ],
+        routing=RoutingConfig(),
+    )
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00})
+    assert result.is_triggered is False
+    assert len(result.triggered_events) == 0
+
+
+def test_evaluate_condition_group_fallback_to_single_condition():
+    rule = WatcherRule(
+        id="cg_fallback",
+        name="ConditionGroup Fallback",
+        target=TargetConfig(url="https://example.com"),
+        extractors=[ExtractorConfig(name="price", selector_type="css", selector="span.amount", transforms=["strip_tags", "to_float"])],
+        triggers=[
+            TriggerConfig(
+                type="numeric_delta",
+                field="price",
+                condition="abs_delta > 0.01",
+                importance="important",
+            )
+        ],
+        routing=RoutingConfig(),
+    )
+    result = RuleEvaluator.evaluate(rule, HTML_DOC, old_values={"price": 89.00})
+    assert result.is_triggered is True
+    assert len(result.triggered_events) == 1

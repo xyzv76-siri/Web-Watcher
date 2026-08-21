@@ -292,4 +292,4 @@ MIT License. See [LICENSE](LICENSE) for details.
 - **Retention / Export Filters v1** — `RetentionManager.enforce()` 支持按 `entity_id`、`event_type`、`importance`、`status`、`channel` 选择性清理；dry-run 零副作用。
 - **Notification Retry & Stats v1** — `notify --stats` 输出按状态/渠道聚合的投递统计；`notify --retry` 重试失败通知。
 - **GitHub Subresource Isolation v1** — `GitHubTarget` 支持 `watch_types`（releases/stars/tags）子资源状态隔离。
-- **Ground Truth** — 全量测试 **1508 passed**；12 项运行时行为验证全部通过。
+- **Ground Truth** — 全量测试 **1518 passed**；12 项运行时行为验证全部通过。

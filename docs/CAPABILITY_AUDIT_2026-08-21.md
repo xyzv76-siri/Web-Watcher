@@ -2,7 +2,7 @@
 
 > 日期：2026-08-21  
 > 版本：v1.0.2  
-> 状态：基于当前代码库 / 测试 1508 passed / README 已同步
+> 状态：基于当前代码库 / 测试 1518 passed / README 已同步
 
 ---
 
@@ -20,7 +20,7 @@
 | **通知机制** | 至少一次投递、指数退避重试、fencing、AlertSilencer（内容相似度抑制）、动态噪声（STANDARD/AGGRESSIVE） | 恰好一次投递、富文本模板引擎（已有 card_formatters 基础） |
 | **持久化** | SQLite 自动 schema 初始化、declaration 过期清理、Retention/Export 过滤（entity_id/event_type/importance/status/channel） | 分布式存储、外部数据库迁移 |
 | **运维 CLI** | run/daemon/worker/inspect/reload/registry/template/targets/notify/export/test-rule/doctor | — |
-| **Ground Truth** | 1508 passed、12 项运行时验证、设计文档归档 | — |
+| **Ground Truth** | 1518 passed、12 项运行时验证、设计文档归档 | — |
 
 ---
 
@@ -75,7 +75,7 @@
 当前产品已完成：
 - 核心监控闭环（Target → Fetch → Signal → Event → Investigation → Notification）
 - 规则热加载、运行时注册表、模板生态、批量操作、过滤/保留策略
-- Ground Truth 验证（1508 passed）
+- Ground Truth 验证（1518 passed）
 
 **剩余工作已从「基础能力补齐」转向「场景深化」。**
 
@@ -93,7 +93,7 @@
 - 分支 `master` 与 `origin/master` 同步
 - 最新提交：`a8fa6a1` (feat: Cross-Target 6 Part fix)
 - 最新 tag：`web-watcher-1.0.2`
-- 测试：1508 passed
+- 测试：1518 passed
 - 已提交：`docs/CAPABILITY_AUDIT_2026-08-21.md`
 - 已归档设计文档：`docs/archive/`（6 份）
 

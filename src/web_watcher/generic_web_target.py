@@ -135,6 +135,7 @@ class GenericWebTarget:
         cookies = meta.get("cookies") or {}
         basic_auth = meta.get("basic_auth")
         proxy = meta.get("proxy")
+        js_render = bool(meta.get("js_render"))
 
         try:
             fetch_res: FetchResult = fetcher.fetch(
@@ -144,8 +145,9 @@ class GenericWebTarget:
                 last_modified=self.target.last_modified,
                 timeout=self.timeout,
                 cookies=cookies or None,
-                auth=tuple(basic_auth) if basic_auth else None,
+                auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                 proxy=proxy,
+                js_render=js_render,
             )
         finally:
             # Release host claim after fetch completes (success or failure)
@@ -498,18 +500,21 @@ class GenericWebTarget:
                         id=f"sig_{self.target.id}_{int(now.timestamp())}",
                         entity_id=self.target.id,
                         signal_type=SignalType.CONTENT_CHANGE,
-                        payload=payload,
+                        value=json.dumps(payload, ensure_ascii=False),
                         observed_at=now,
+                        fingerprint=content_hash,
                     )
-                except Exception:
+                except (TypeError, ValueError) as exc:
+                    logger.debug("Signal construction failed for %s: %s", self.target.id, exc)
                     try:
                         sig_obj = Signal(
                             entity_id=self.target.id,
                             signal_type=SignalType.CONTENT_CHANGE,
-                            payload=payload,
+                            value=json.dumps(payload, ensure_ascii=False),
                             observed_at=now,
+                            fingerprint=content_hash,
                         )
-                    except Exception:
+                    except (TypeError, ValueError):
                         sig_obj = payload
             else:
                 sig_obj = payload

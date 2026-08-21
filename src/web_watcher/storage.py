@@ -11,6 +11,10 @@ def open_database(path: str | Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    try:
+        db_path.chmod(0o600)
+    except OSError:
+        pass
     return conn
 
 

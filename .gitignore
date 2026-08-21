@@ -15,3 +15,5 @@ reports/*
 !reports/.gitkeep
 *.db
 *_TODO.md
+GLOBAL_AUDIT_REPORT.md
+GROUND_TRUTH_ACCEPTANCE_REPORT.md

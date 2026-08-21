@@ -1,10 +1,11 @@
 import hashlib
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
-from web_watcher.models import Target, TargetStatus
+from web_watcher.models import Target, TargetStatus, Signal
 from web_watcher.rss_feed_target import RSSFeedTarget, FeedEntry, TargetExecutionResult
 
 
@@ -109,7 +110,7 @@ def test_execute_emits_signal_for_new_entries():
     assert result.updated_metadata["feed_entries"][first_id]["title"] == "First Entry"
 
     sig0 = result.signals_emitted[0]
-    payload = sig0.payload if hasattr(sig0, "payload") else sig0
+    payload = json.loads(sig0.value) if isinstance(sig0, Signal) else sig0
     assert payload["change_type"] == "new_entry"
 
 
@@ -166,5 +167,5 @@ def test_execute_no_duplicate_signals_on_unchanged_feed():
     assert result.outcome.value == "success_changed"
     assert len(result.signals_emitted) == 1
     sig0 = result.signals_emitted[0]
-    payload = sig0.payload if hasattr(sig0, "payload") else sig0
+    payload = json.loads(sig0.value) if isinstance(sig0, Signal) else sig0
     assert payload["change_type"] == "new_entry"

@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--smtp-password",
         type=str,
         default=None,
-        help="SMTP authentication password (avoid on command line; prefer WEB_WATCHER_SMTP_PASSWORD env var)",
+        help="[DEPRECATED] SMTP authentication password. Using CLI flags exposes the password to process listings and shell history. Prefer the WEB_WATCHER_SMTP_PASSWORD environment variable.",
     )
     notify_parser.add_argument(
         "--smtp-use-tls",
@@ -961,7 +961,15 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
     email_sender = None
     if getattr(args, "smtp_host", None):
         smtp_password = getattr(args, "smtp_password", None)
-        if smtp_password is None:
+        if smtp_password is not None:
+            import warnings
+            warnings.warn(
+                "--smtp-password is deprecated and will be removed in a future major version. "
+                "Use the WEB_WATCHER_SMTP_PASSWORD environment variable instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        else:
             import os
             smtp_password = os.getenv("WEB_WATCHER_SMTP_PASSWORD")
         email_sender = EmailSender(

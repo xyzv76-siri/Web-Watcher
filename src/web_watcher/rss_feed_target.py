@@ -1,4 +1,5 @@
 import hashlib
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -242,7 +243,7 @@ class RSSFeedTarget:
                 last_modified=self.target.last_modified,
                 timeout=self.timeout,
                 cookies=cookies or None,
-                auth=tuple(basic_auth) if basic_auth else None,
+                auth=tuple(basic_auth.values()) if basic_auth and isinstance(basic_auth, dict) else None,
                 proxy=proxy,
             )
         finally:
@@ -418,8 +419,9 @@ class RSSFeedTarget:
                             id=f"sig_{self.target.id}_{entry_id}_{int(now.timestamp())}",
                             entity_id=self.target.id,
                             signal_type=SignalType.CONTENT_CHANGE,
-                            payload=payload,
+                            value=json.dumps(payload, ensure_ascii=False),
                             observed_at=now,
+                            fingerprint=entry.content_hash,
                         )
                     except (TypeError, ValueError) as exc:
                         logger.debug("Signal construction failed for %s: %s", entry_id, exc)
