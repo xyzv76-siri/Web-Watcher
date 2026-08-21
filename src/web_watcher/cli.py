@@ -581,27 +581,36 @@ def handle_run(args: argparse.Namespace, config: AppConfig) -> int:
     auto_deliver = getattr(args, "auto_deliver", False)
     webhook_url = getattr(args, "webhook_url", None)
     channel = getattr(args, "channel", "webhook")
+    include_tags = getattr(args, "include_tags", None) or []
+    exclude_tags = getattr(args, "exclude_tags", None) or []
 
     repo = Repository(db_path)
-    dispatcher = _build_dispatcher(repo, webhook_url, config) if auto_deliver else None
-
-    correlator = EventCorrelator(
-        repository=repo,
-        auto_investigate=auto_inv,
-    )
-    runner = PipelineRunner(
-        repository=repo,
-        correlator=correlator,
-        dispatcher=dispatcher,
-        auto_notify=True,
-        auto_deliver=auto_deliver,
-        notify_channel=channel,
+    
+    # Use ScheduledRunner for actual execution with tag filtering
+    from .scheduled_runner import ScheduledRunner
+    runner = ScheduledRunner(
+        repo=repo,
         config=config,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
     )
-    print(f"Pipeline run initialized (auto_investigate={auto_inv}, auto_deliver={auto_deliver}, db={db_path}).")
+    
     if run_once:
-        print("Completed single pipeline cycle.")
+        summary = runner.run_once()
+        rules_filtered = summary.get("rules_filtered", 0)
+        if rules_filtered:
+            print(f"Filtered {rules_filtered} rules by tags")
+        print(f"Pipeline run completed: {summary.get('targets_evaluated', 0)} targets evaluated")
         return 0
+    
+    print(f"Starting continuous pipeline run (interval={interval}s, auto_investigate={auto_inv})... Press Ctrl+C to stop.")
+    try:
+        while True:
+            runner.run_once()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nPipeline run stopped by user.")
+    return 0
 
     print(f"Starting continuous pipeline run (interval={interval}s, auto_investigate={auto_inv})... Press Ctrl+C to stop.")
     try:
@@ -619,27 +628,25 @@ def handle_daemon(args: argparse.Namespace, config: AppConfig) -> int:
     auto_deliver = getattr(args, "auto_deliver", False)
     webhook_url = getattr(args, "webhook_url", None)
     channel = getattr(args, "channel", "webhook")
+    include_tags = getattr(args, "include_tags", None) or []
+    exclude_tags = getattr(args, "exclude_tags", None) or []
 
     repo = Repository(db_path)
-    dispatcher = _build_dispatcher(repo, webhook_url, config) if auto_deliver else None
-
-    correlator = EventCorrelator(
-        repository=repo,
-        auto_investigate=auto_inv,
-    )
-    runner = PipelineRunner(
-        repository=repo,
-        correlator=correlator,
-        dispatcher=dispatcher,
-        auto_notify=True,
-        auto_deliver=auto_deliver,
-        notify_channel=channel,
+    
+    # Use ScheduledRunner for actual execution with tag filtering
+    from .scheduled_runner import ScheduledRunner
+    runner = ScheduledRunner(
+        repo=repo,
         config=config,
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
     )
+    
     print(f"Starting web-watcher daemon (interval={interval}s, auto_investigate={auto_inv}, db={db_path})...")
     print("Press Ctrl+C to stop.")
     try:
         while True:
+            runner.run_once()
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nDaemon stopped by user.")

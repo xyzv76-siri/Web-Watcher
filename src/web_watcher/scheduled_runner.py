@@ -51,6 +51,8 @@ class ScheduledRunner:
         policy: Optional[FetchPolicy] = None,
         worker_id: Optional[str] = None,
         metrics: Optional[Any] = None,
+        include_tags: Optional[List[str]] = None,
+        exclude_tags: Optional[List[str]] = None,
     ):
         self.config = config or get_config()
         self.repo = repo
@@ -64,6 +66,8 @@ class ScheduledRunner:
         self._rule_cache: Dict[str, WatcherRule] = {}
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.metrics = metrics
+        self.include_tags = include_tags or []
+        self.exclude_tags = exclude_tags or []
 
     def _inc(self, name: str, tags: Optional[Dict[str, str]] = None, amount: int = 1) -> None:
         if not self.metrics:
@@ -309,6 +313,35 @@ class ScheduledRunner:
             except Exception:
                 pass
 
+        # 1.2 Tag filtering (before execution)
+        rules_filtered = 0
+        if self.repo and (getattr(self, "include_tags", None) or getattr(self, "exclude_tags", None)):
+            # Get all targets from repo
+            all_targets = self.repo.list_targets()
+            filtered_targets = []
+            include_tags = getattr(self, "include_tags", None) or []
+            exclude_tags = getattr(self, "exclude_tags", None) or []
+            
+            for t in all_targets:
+                target_tags = list(getattr(t, "tags", None) or [])
+                
+                # exclude 优先
+                if exclude_tags and any(tag in target_tags for tag in exclude_tags):
+                    rules_filtered += 1
+                    continue
+                
+                # include 检查
+                if include_tags and not any(tag in target_tags for tag in include_tags):
+                    rules_filtered += 1
+                    continue
+                
+                filtered_targets.append(t)
+            
+            # Replace rule cache with filtered rules
+            if include_tags or exclude_tags:
+                filtered_rule_ids = {t.id for t in filtered_targets}
+                self._rule_cache = {k: v for k, v in self._rule_cache.items() if k in filtered_rule_ids}
+
         # 2. Claim：生产路径必须通过 lease/fencing
         claimed: List[Any] = []
         if self.repo and hasattr(self.repo, "claim_targets"):
@@ -328,9 +361,10 @@ class ScheduledRunner:
             "is_304_count": 0,
             "skipped_count": 0,
             "errors": [],
+            "rules_filtered": rules_filtered,
         }
         import logging
-        logging.warning(f"[DEBUG] claimed count={len(claimed)}, ids={[c.id for c in claimed]}")
+        logging.warning(f"[DEBUG] claimed count={len(claimed)}, ids={[c.id for c in claimed]}, rules_filtered={rules_filtered}")
 
         all_signals = []
 

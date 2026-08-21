@@ -1,7 +1,7 @@
 """Pipeline Runner: end-to-end orchestration of signals, events, auto-investigation, and enriched notifications (Phase 12-C)."""
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .channel_senders import BaseChannelSender, ConsoleSender, DeliveryResult, WebhookSender
 from .event_correlator import EventCorrelator
@@ -13,6 +13,36 @@ from .repository import Repository
 from .config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+
+def filter_rules_by_tags(
+    rules: List[Any],
+    include_tags: List[str],
+    exclude_tags: List[str],
+) -> Tuple[List[Any], int]:
+    """Filter rules by include/exclude tags.
+
+    Returns (filtered_rules, filtered_count).
+    """
+    filtered = []
+    filtered_count = 0
+
+    for rule in rules:
+        rule_tags = set(getattr(rule, "tags", None) or [])
+
+        # exclude 优先
+        if exclude_tags and rule_tags & set(exclude_tags):
+            filtered_count += 1
+            continue
+
+        # include 检查
+        if include_tags and not (rule_tags & set(include_tags)):
+            filtered_count += 1
+            continue
+
+        filtered.append(rule)
+
+    return filtered, filtered_count
 
 
 class PipelineRunner:

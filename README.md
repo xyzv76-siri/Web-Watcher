@@ -162,6 +162,19 @@ python -m web_watcher.cli targets list --tag price
 python -m web_watcher.cli targets list --tag status --tag ops
 ```
 
+运行时按标签过滤监控任务：
+
+```bash
+# 只巡检带 price 或 ecommerce 标签的目标
+python -m web_watcher.cli run --once --include-tags price --include-tags ecommerce
+
+# 排除带 status 标签的目标
+python -m web_watcher.cli run --once --exclude-tags status
+
+# 组合使用：先排除，再包含
+python -m web_watcher.cli daemon --exclude-tags test --include-tags critical
+```
+
 手动编辑 `rules.yaml` 也可添加标签：
 
 ```yaml
