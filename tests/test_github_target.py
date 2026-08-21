@@ -579,3 +579,119 @@ def test_github_target_independent_subresource_outcomes():
 
     assert observed_status == TargetStatus.COOLDOWN
     assert observed_next_allowed_at == release_eval.next_allowed_at
+
+
+COMMIT_PAYLOAD = {
+    "sha": "abc123def456789",
+    "commit": {
+        "message": "Fix authentication bug",
+        "author": {"name": "Alice"},
+    },
+    "html_url": "https://github.com/pallets/flask/commit/abc123def456789",
+}
+
+PR_PAYLOAD = [
+    {
+        "number": 123,
+        "state": "open",
+        "title": "Add new feature",
+        "html_url": "https://github.com/pallets/flask/pull/123",
+        "updated_at": "2026-08-20T10:00:00Z",
+    }
+]
+
+ISSUE_PAYLOAD = [
+    {
+        "number": 456,
+        "state": "open",
+        "title": "Bug report",
+        "html_url": "https://github.com/pallets/flask/issues/456",
+        "updated_at": "2026-08-20T10:00:00Z",
+    }
+]
+
+
+def test_github_target_commit_pushed_signal():
+    target = Target(
+        id="gh_commits",
+        url="pallets/flask",
+        metadata={"last_commit_sha": "oldsha123"},
+    )
+    adapter = GitHubTarget(target=target, watch_types=["commits"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_commits",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps([COMMIT_PAYLOAD]),
+        etag='"commit-etag-new"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 1
+    sig = res.signals_emitted[0]
+    payload = sig.payload if hasattr(sig, "payload") else sig
+    assert payload["sha"] == "abc123def456789"
+    assert res.updated_metadata["last_commit_sha"] == "abc123def456789"
+
+
+def test_github_target_pr_status_changed_signal():
+    target = Target(
+        id="gh_prs",
+        url="pallets/flask",
+        metadata={"last_pr_snapshot": {"number": "123", "state": "closed", "updated_at": "2026-08-19T10:00:00Z"}},
+    )
+    adapter = GitHubTarget(target=target, watch_types=["prs"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_prs",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(PR_PAYLOAD),
+        etag='"pr-etag-new"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 1
+    sig = res.signals_emitted[0]
+    payload = sig.payload if hasattr(sig, "payload") else sig
+    assert payload["pr_number"] == "123"
+    assert payload["state"] == "open"
+    assert res.updated_metadata["last_pr_snapshot"]["state"] == "open"
+
+
+def test_github_target_issue_updated_signal():
+    target = Target(
+        id="gh_issues",
+        url="pallets/flask",
+        metadata={"last_issue_snapshot": {"number": "456", "state": "closed", "updated_at": "2026-08-19T10:00:00Z"}},
+    )
+    adapter = GitHubTarget(target=target, watch_types=["issues"])
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="gh_issues",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=datetime.utcnow(),
+        content=json.dumps(ISSUE_PAYLOAD),
+        etag='"issue-etag-new"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher)
+
+    assert res.allowed is True
+    assert len(res.signals_emitted) == 1
+    sig = res.signals_emitted[0]
+    payload = sig.payload if hasattr(sig, "payload") else sig
+    assert payload["issue_number"] == "456"
+    assert payload["state"] == "open"
+    assert res.updated_metadata["last_issue_snapshot"]["state"] == "open"

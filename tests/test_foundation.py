@@ -3,7 +3,7 @@ from web_watcher.main import main
 
 
 def test_version():
-    assert version == "0.1.0"
+    assert version == "1.0.2"
 
 
 def test_main():
