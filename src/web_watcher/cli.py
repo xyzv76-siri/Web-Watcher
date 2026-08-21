@@ -894,7 +894,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Telegram Chat ID (for telegram channel)",
     )
 
-    # 12. registry subcommand (Rule Registry v1)
+    # 12. webui subcommand (Web UI v1)
+    webui_parser = subparsers.add_parser(
+        "webui",
+        help="Start lightweight local monitoring dashboard",
+    )
+    webui_parser.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1)",
+    )
+    webui_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port number (default: 8080)",
+    )
+    webui_parser.add_argument(
+        "--db",
+        "--db-path",
+        dest="db_path",
+        type=str,
+        default="web_watcher.db",
+        help="Path to SQLite database file (default: web_watcher.db)",
+    )
+
+    # 13. registry subcommand (Rule Registry v1)
     registry_parser = subparsers.add_parser(
         "registry",
         help="Inspect and manage rule runtime registry",
@@ -2369,6 +2395,30 @@ def handle_cross_target(args: argparse.Namespace, config: AppConfig) -> int:
     return 0
 
 
+def handle_webui(args: argparse.Namespace, config: AppConfig) -> int:
+    from .webui import WebUIServer
+    import threading
+    import webbrowser
+
+    host = getattr(args, "host", "127.0.0.1")
+    port = int(getattr(args, "port", 8080))
+    db_path = getattr(args, "db_path", config.db_path)
+
+    repo = Repository(db_path)
+    server = WebUIServer(host=host, port=port, repository=repo)
+
+    print(f"Starting Web UI at http://{host}:{port}")
+    print("Press Ctrl+C to stop.")
+    try:
+        if host in ("127.0.0.1", "localhost"):
+            threading.Thread(target=lambda: webbrowser.open(f"http://{host}:{port}"), daemon=True).start()
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+        print("\nWeb UI stopped by user.")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -2406,6 +2456,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_reload(args, config)
     if args.command == "registry":
         return handle_registry(args, config)
+    if args.command == "webui":
+        return handle_webui(args, config)
 
     parser.print_help()
     return 0
