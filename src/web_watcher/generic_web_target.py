@@ -359,6 +359,12 @@ class GenericWebTarget:
                     "diff_summary": diffs.get(name, DiffResult.unchanged("", "")).summary,
                     "selector_type": extractor_configs[name].selector_type,
                     "selector": extractor_configs[name].selector,
+                    # Diff scope metadata for investigation.
+                    "scope_selector": extractor_configs[name].scope_selector,
+                    "scope_miss": result.metadata.get("scope_miss"),
+                    "scope_matched_count": result.metadata.get("match_count"),
+                    "scope_merged_count": result.metadata.get("merged_count"),
+                    "scope_input_length": result.metadata.get("scope_input_length"),
                     # Dynamic noise analysis for investigation.
                     "noise_filtered_previous": self.false_positive_guard.noise_filter.filter(
                         previous_values.get(name, "")

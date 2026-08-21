@@ -205,6 +205,35 @@ def test_generic_web_target_custom_headers_passed_to_fetcher():
     assert call_kwargs["url"] == "https://example.com"
 
 
+HTML_SCOPE_V1 = """
+<div class="pricing">
+    <div class="plan">Pro</div>
+    <div class="price">$99.00</div>
+    <aside class="ads">Buy now!</aside>
+</div>
+"""
+
+HTML_SCOPE_V2 = """
+<div class="pricing">
+    <div class="plan">Pro</div>
+    <div class="price">$79.00</div>
+    <aside class="ads">Buy now!</aside>
+</div>
+"""
+
+
+def _make_scope_extractors():
+    return [
+        ExtractorConfig(
+            name="price",
+            selector_type="css",
+            selector="div.pricing",
+            scope_selector=".price",
+            transforms=["strip_tags", "to_float"],
+        )
+    ]
+
+
 def test_generic_web_target_repo_saves_target_and_signal():
     now = datetime.utcnow()
     target = Target(id="t_repo", url="https://example.com")
@@ -234,3 +263,98 @@ def test_generic_web_target_repo_saves_target_and_signal():
     assert len(res.signals_emitted) == 0
     assert res.updated_etag == '"etag-v1"'
     assert res.observation.status == "first_observation"
+
+
+def test_generic_web_target_scope_selector_narrows_content():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_scope",
+        url="https://example.com/pricing",
+        metadata={"initialized": True, "normalized_values": {"price": "99.0"}},
+    )
+    adapter = GenericWebTarget(target=target, extractors=_make_scope_extractors())
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_scope",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SCOPE_V2,
+        etag='"etag-v2"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert res.status_code == 200
+    # Only the scoped .price element should be compared; ads should be ignored.
+    assert len(res.signals_emitted) == 1
+    assert res.extracted_values["price"] == 79.0
+    assert res.outcome == ExecutionOutcome.SUCCESS_CHANGED
+
+
+def test_generic_web_target_scope_selector_miss_blocks_signal():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_scope_miss",
+        url="https://example.com/pricing",
+        metadata={"initialized": True, "normalized_values": {"price": "99.0"}},
+    )
+    adapter = GenericWebTarget(
+        target=target,
+        extractors=[
+            ExtractorConfig(
+                name="price",
+                selector_type="css",
+                selector="div.pricing",
+                scope_selector=".non-existent",
+            )
+        ],
+    )
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_scope_miss",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SCOPE_V2,
+        etag='"etag-v2"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert res.status_code == 200
+    # Scope miss must NOT silently fall back; it should be treated as extraction failure.
+    assert len(res.signals_emitted) == 0
+    assert res.outcome == ExecutionOutcome.SELECTOR_NOT_FOUND
+    assert "scope" in res.reason.lower() or "selector" in res.reason.lower()
+
+
+def test_generic_web_target_without_scope_keeps_existing_behavior():
+    now = datetime.utcnow()
+    target = Target(
+        id="t_no_scope",
+        url="https://example.com/pricing",
+        metadata={"initialized": True, "normalized_values": {"price": "99.0"}},
+    )
+    adapter = GenericWebTarget(target=target, extractors=_make_extractors())
+
+    mock_fetcher = MagicMock(spec=SmartFetcher)
+    mock_fetcher.fetch.return_value = FetchResult(
+        target_key="t_no_scope",
+        status=FetchStatus.SUCCESS,
+        status_code=200,
+        fetched_at=now,
+        content=HTML_SCOPE_V2,
+        etag='"etag-v2"',
+    )
+
+    res = adapter.execute(fetcher=mock_fetcher, now=now)
+
+    assert res.allowed is True
+    assert res.status_code == 200
+    assert len(res.signals_emitted) == 1
+    assert res.outcome == ExecutionOutcome.SUCCESS_CHANGED
