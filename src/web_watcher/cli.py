@@ -20,6 +20,8 @@ from .retention import RetentionManager, RetentionPolicy
 from .config import get_config, AppConfig
 from .rule_parser import RuleParser
 from .rule_evaluator import RuleEvaluator
+from .rule_models import WatcherRule
+from .presets import get_preset, list_presets
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +288,42 @@ def build_parser() -> argparse.ArgumentParser:
     test_rule_parser.add_argument("--html-file", default=None, help="Local HTML file to evaluate against")
     test_rule_parser.add_argument("--url", default=None, help="Remote URL to fetch and evaluate")
 
+    # 9. template subcommand (Preset)
+    template_parser = subparsers.add_parser(
+        "template",
+        help="Generate monitoring rules from presets",
+    )
+    template_subparsers = template_parser.add_subparsers(dest="template_command", help="Template commands")
+
+    # template list
+    template_list_parser = template_subparsers.add_parser(
+        "list",
+        help="List available presets",
+    )
+
+    # template show
+    template_show_parser = template_subparsers.add_parser(
+        "show",
+        help="Show preset details",
+    )
+    template_show_parser.add_argument("preset", help="Preset name")
+
+    # template apply
+    template_apply_parser = template_subparsers.add_parser(
+        "apply",
+        help="Generate a rules YAML from a preset",
+    )
+    template_apply_parser.add_argument("preset", help="Preset name")
+    template_apply_parser.add_argument("--url", required=True, help="Target URL")
+    template_apply_parser.add_argument("--repo", default=None, help="GitHub owner/repo (for github_* presets)")
+    template_apply_parser.add_argument("--selector", default=None, help="CSS selector (for blog_post/price presets)")
+    template_apply_parser.add_argument("--interval", default=None, help="Monitoring interval (e.g. 15m, 1h)")
+    template_apply_parser.add_argument("--channel", default=None, help="Notification channel (default: console)")
+    template_apply_parser.add_argument("--cooldown", default=None, help="Cooldown duration (e.g. 300s)")
+    template_apply_parser.add_argument("--rule-id", default=None, help="Rule ID override")
+    template_apply_parser.add_argument("--name", default=None, help="Rule name override")
+    template_apply_parser.add_argument("--output", "-o", default=None, help="Output file path (default: stdout)")
+
     return parser
 
 
@@ -521,6 +559,134 @@ def handle_test_rule(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_template(args: argparse.Namespace, config: AppConfig) -> int:
+    if args.template_command == "list":
+        print("Available presets:\n")
+        for preset in list_presets():
+            print(f"  {preset.name:20s} {preset.description}")
+        return 0
+
+    if args.template_command == "show":
+        try:
+            preset = get_preset(args.preset)
+        except KeyError as e:
+            print(f"[ERROR] {e}")
+            return 1
+        print(f"Preset: {preset.name}")
+        print(f"Description: {preset.description}\n")
+
+        example_url = "https://example.com"
+        overrides: Dict[str, Any] = {}
+        if args.preset == "github_release":
+            example_url = "https://github.com/owner/repo"
+            overrides["repo"] = "owner/repo"
+        elif args.preset == "blog_post":
+            overrides["selector"] = "h1"
+        elif args.preset == "price":
+            example_url = "https://example.com/product/123"
+            overrides["selector"] = ".price"
+
+        example_rule = preset.generate(example_url, **overrides)
+        print("Example rule (illustrative):")
+        print(_rule_to_yaml(example_rule))
+        return 0
+
+    if args.template_command == "apply":
+        try:
+            preset = get_preset(args.preset)
+        except KeyError as e:
+            print(f"[ERROR] {e}")
+            return 1
+
+        overrides: Dict[str, Any] = {}
+        if args.repo:
+            overrides["repo"] = args.repo
+        if args.selector:
+            overrides["selector"] = args.selector
+        if args.interval:
+            overrides["interval"] = args.interval
+        if args.channel:
+            overrides["channel"] = args.channel
+        if args.cooldown:
+            overrides["cooldown"] = args.cooldown
+        if args.rule_id:
+            overrides["rule_id"] = args.rule_id
+        if args.name:
+            overrides["name"] = args.name
+
+        try:
+            rule = preset.generate(args.url, **overrides)
+        except ValueError as e:
+            print(f"[ERROR] {e}")
+            return 1
+
+        yaml_content = _rule_to_yaml(rule)
+        if args.output:
+            Path(args.output).write_text(yaml_content, encoding="utf-8")
+            print(f"[OK] Generated rule written to {args.output}")
+        else:
+            print(yaml_content)
+        return 0
+
+    print("[ERROR] Unknown template command. Use: list, show, apply")
+    return 1
+
+
+def _yaml_value(value: str) -> str:
+    needs_quote = any(c in value for c in [":", "#", "[", "]", "{", "}", ",", "&", "*", "!"]) or value.lower() in ("true", "false", "yes", "no", "on", "off", "null", "~") or value == "" or (value[0:1].isdigit() and value.strip() != value)
+    if not needs_quote and "'" not in value and '"' not in value:
+        return value
+    if "'" not in value:
+        return f"'{value}'"
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _rule_to_yaml(rule: WatcherRule) -> str:
+    """Serialize a WatcherRule to YAML string compatible with RuleParser."""
+    lines = [f'version: "1.0"', "rules:"]
+    lines.append(f"  - id: {rule.id}")
+    lines.append(f"    name: {_yaml_value(rule.name)}")
+    lines.append("    target:")
+    lines.append(f"      url: {_yaml_value(rule.target.url)}")
+    lines.append(f"      interval: {_yaml_value(rule.target.interval)}")
+    lines.append(f"      timeout: {rule.target.timeout}")
+    if rule.target.headers:
+        lines.append("      headers:")
+        for k, v in rule.target.headers.items():
+            lines.append(f"        {_yaml_value(k)}: {_yaml_value(v)}")
+
+    if rule.extractors:
+        lines.append("    extractors:")
+        for ext in rule.extractors:
+            lines.append(f"      - name: {ext.name}")
+            lines.append(f"        selector_type: {ext.selector_type}")
+            lines.append(f"        selector: {_yaml_value(ext.selector)}")
+            if ext.transforms:
+                lines.append(f"        transforms: {_yaml_list(ext.transforms)}")
+
+    if rule.triggers:
+        lines.append("    triggers:")
+        for trg in rule.triggers:
+            lines.append(f"      - type: {trg.type}")
+            lines.append(f"        field: {trg.field}")
+            if trg.condition:
+                lines.append(f"        condition: {_yaml_value(trg.condition)}")
+            lines.append(f"        importance: {trg.importance}")
+            if trg.title_template:
+                lines.append(f"        title_template: {_yaml_value(trg.title_template)}")
+            if trg.body_template:
+                lines.append(f"        body_template: {_yaml_value(trg.body_template)}")
+
+    lines.append("    routing:")
+    lines.append(f"      channels: {_yaml_list(rule.routing.channels)}")
+    lines.append(f"      cooldown: {_yaml_value(rule.routing.cooldown)}")
+    return "\n".join(lines) + "\n"
+
+
+def _yaml_list(items: List[str]) -> str:
+    return "[" + ", ".join(items) + "]"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -542,6 +708,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_retention(args, config)
     if args.command == "test-rule":
         return handle_test_rule(args)
+    if args.command == "template":
+        return handle_template(args, config)
 
     parser.print_help()
     return 0
