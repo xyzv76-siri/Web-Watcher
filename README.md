@@ -201,6 +201,8 @@ python -m web_watcher.cli daemon --exclude-tags test --include-tags critical
 * Lark
 * DingTalk
 * Email (SMTP)
+* Telegram (Bot API)
+* Discord (Webhook)
 
 ## 部署
 
@@ -297,9 +299,15 @@ MIT License. See [LICENSE](LICENSE) for details.
 ### v1.0.4 — 2026-08-21
 
 - **Digest v1** — 新增 `digest` CLI 子命令，支持 `daily` / `weekly` 预设及自定义 `--since` / `--until` 时间窗口；按 target 汇总事件并生成 Markdown 报告；支持 `--channel console` 直接输出或通过 `webhook` / `email` 渠道派发；`--min-importance` 可过滤只汇总重要以上事件。
-- **Ground Truth** — 全量测试 **1525 passed**（含 7 个新增 digest 测试）。
+- **Ground Truth** — 全量测试 **1531 passed**。
 
-### v1.0.3 — 2026-08-21
+### v1.0.5 — 2026-08-21
+
+- **Telegram / Discord 原生通知** — 新增 `TelegramSender`（Bot API `sendMessage`）与 `DiscordSender`（Webhook Embed）；`notify` 与 `digest` 均支持 `--telegram-bot-token` / `--telegram-chat-id` 与 `--channel discord`；Discord embed 描述自动截断至 4000 字符。
+- **通知渠道** — 内置渠道扩展为 Console / Webhook / Slack / Lark / DingTalk / Email / Telegram / Discord。
+- **Ground Truth** — 全量测试 **1531 passed**（含 6 个新增 Telegram/Discord 测试）。
+
+### v1.0.4 — 2026-08-21
 
 - **Signal Contract 统一** — `GitHubTarget`、`GenericWebTarget`、`RSSFeedTarget` 的 Signal 构造统一为 `value=` + `observed_at=`，移除已弃用的 `payload=` / `created_at=`；异常处理收紧为 `TypeError/ValueError`，避免裸 `except Exception` 吞错。
 - **Signal 归一化增强** — `scheduled_runner._normalize_signal` 增加 `observed_at` / `signal_type` / `value` 的兜底解析，dict-based payload 可稳定转为 `Signal`。
