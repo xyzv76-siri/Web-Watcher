@@ -283,3 +283,110 @@ class EmailSender(BaseChannelSender):
             return DeliveryResult(success=False, error_message=f"SMTPError: {str(exc)}")
         except Exception as exc:
             return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+
+class TelegramSender(BaseChannelSender):
+    """Delivers notifications via Telegram Bot API."""
+
+    def __init__(self, bot_token: str, chat_id: str, timeout: float = 10.0):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        self.timeout = timeout
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        payload = notification.payload or {}
+        event_type = payload.get("event_type", "unknown")
+        importance = payload.get("importance", "normal").upper()
+        title = f"[{importance}] Web-Watcher: {event_type}"
+        text = self._format_text(notification, title)
+
+        request_payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        try:
+            import urllib.request
+            import urllib.error
+            req = urllib.request.Request(
+                self.api_url,
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8")
+                return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
+        except urllib.error.HTTPError as exc:
+            return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+    def _format_text(self, notification: Notification, title: str) -> str:
+        payload = notification.payload or {}
+        lines = [f"*{title}*"]
+        lines.append(f"Event: {payload.get('event_type', 'unknown')}")
+        lines.append(f"Notification ID: {notification.id}")
+        lines.append(f"Event ID: {notification.event_id}")
+        lines.append(f"Channel: {notification.channel}")
+        lines.append(f"Status: {notification.status}")
+        lines.append(f"Created At: {notification.created_at}")
+        if payload.get("has_investigation"):
+            inv = payload.get("investigation", {})
+            lines.append(f"Investigation: {inv.get('summary', 'N/A')}")
+        return "\n".join(lines)
+
+
+class DiscordSender(BaseChannelSender):
+    """Delivers notifications via Discord Webhook."""
+
+    def __init__(self, webhook_url: str, timeout: float = 10.0):
+        self.webhook_url = webhook_url
+        self.timeout = timeout
+
+    def send(self, notification: Notification) -> DeliveryResult:
+        payload = notification.payload or {}
+        event_type = payload.get("event_type", "unknown")
+        importance = payload.get("importance", "normal").upper()
+        title = f"[{importance}] Web-Watcher: {event_type}"
+        description = self._format_description(notification)
+
+        embed = {
+            "title": title,
+            "description": description[:4000],
+            "color": 5814783,
+        }
+        request_payload = {"embeds": [embed]}
+        try:
+            import urllib.request
+            import urllib.error
+            req = urllib.request.Request(
+                self.webhook_url,
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                body = resp.read().decode("utf-8")
+                return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
+        except urllib.error.HTTPError as exc:
+            return DeliveryResult(success=False, status_code=exc.code, error_message=f"HTTPError: {exc.reason}")
+        except Exception as exc:
+            return DeliveryResult(success=False, error_message=f"NetworkError: {str(exc)}")
+
+    def _format_description(self, notification: Notification) -> str:
+        payload = notification.payload or {}
+        lines = [
+            f"Event: {payload.get('event_type', 'unknown')}",
+            f"Notification ID: {notification.id}",
+            f"Event ID: {notification.event_id}",
+            f"Channel: {notification.channel}",
+            f"Status: {notification.status}",
+            f"Created At: {notification.created_at}",
+        ]
+        if payload.get("has_investigation"):
+            inv = payload.get("investigation", {})
+            lines.append(f"Investigation: {inv.get('summary', 'N/A')}")
+        return "\n".join(lines)

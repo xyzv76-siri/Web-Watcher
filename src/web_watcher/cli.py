@@ -158,6 +158,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="web_watcher.db",
         help="Path to SQLite database file (default: web_watcher.db)",
     )
+    notify_parser.add_argument(
+        "--telegram-bot-token",
+        dest="telegram_bot_token",
+        default=None,
+        help="Telegram Bot Token (for telegram channel)",
+    )
+    notify_parser.add_argument(
+        "--telegram-chat-id",
+        dest="telegram_chat_id",
+        default=None,
+        help="Telegram Chat ID (for telegram channel)",
+    )
 
     # notify history
     notify_parser.add_argument(
@@ -869,6 +881,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="web_watcher.db",
         help="Path to SQLite database file (default: web_watcher.db)",
     )
+    digest_parser.add_argument(
+        "--telegram-bot-token",
+        dest="telegram_bot_token",
+        default=None,
+        help="Telegram Bot Token (for telegram channel)",
+    )
+    digest_parser.add_argument(
+        "--telegram-chat-id",
+        dest="telegram_chat_id",
+        default=None,
+        help="Telegram Chat ID (for telegram channel)",
+    )
 
     # 12. registry subcommand (Rule Registry v1)
     registry_parser = subparsers.add_parser(
@@ -1032,6 +1056,8 @@ def _build_dispatcher(
     webhook_url: Optional[str],
     config: AppConfig,
     email_sender: Optional[EmailSender] = None,
+    telegram_bot_token: Optional[str] = None,
+    telegram_chat_id: Optional[str] = None,
 ) -> NotificationDispatcher:
     dispatcher = NotificationDispatcher(
         repository=repo,
@@ -1044,6 +1070,9 @@ def _build_dispatcher(
         dispatcher.register_sender("webhook", WebhookSender(webhook_url=webhook_url))
     if email_sender is not None:
         dispatcher.register_sender("email", email_sender)
+    if telegram_bot_token and telegram_chat_id:
+        from .channel_senders import TelegramSender
+        dispatcher.register_sender("telegram", TelegramSender(bot_token=telegram_bot_token, chat_id=telegram_chat_id))
     return dispatcher
 
 
@@ -1155,7 +1184,14 @@ def handle_notify(args: argparse.Namespace, config: AppConfig) -> int:
         return 0
 
     # Default: run dispatcher
-    dispatcher = _build_dispatcher(repo, webhook_url, config, email_sender=email_sender)
+    dispatcher = _build_dispatcher(
+        repo,
+        webhook_url,
+        config,
+        email_sender=email_sender,
+        telegram_bot_token=getattr(args, "telegram_bot_token", None),
+        telegram_chat_id=getattr(args, "telegram_chat_id", None),
+    )
 
     if run_once:
         count = dispatcher.run_once()
@@ -1251,6 +1287,21 @@ def handle_digest(args: argparse.Namespace, config: AppConfig) -> int:
             from_addr=getattr(args, "digest_email_from", None),
             to_addrs=getattr(args, "digest_email_to", None) or [],
         )
+    elif channel == "telegram":
+        bot_token = getattr(args, "telegram_bot_token", None)
+        chat_id = getattr(args, "telegram_chat_id", None)
+        if not bot_token or not chat_id:
+            print("Error: --telegram-bot-token and --telegram-chat-id are required for telegram channel", file=sys.stderr)
+            return 2
+        from .channel_senders import TelegramSender
+        sender = TelegramSender(bot_token=bot_token, chat_id=chat_id)
+    elif channel == "discord":
+        url = getattr(args, "digest_webhook_url", None)
+        if not url:
+            print("Error: --webhook-url is required for discord channel", file=sys.stderr)
+            return 2
+        from .channel_senders import DiscordSender
+        sender = DiscordSender(webhook_url=url)
     elif channel in ("slack", "lark", "dingtalk"):
         print(f"Error: channel '{channel}' is not yet supported in digest v1", file=sys.stderr)
         return 2
