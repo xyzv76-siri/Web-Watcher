@@ -1,5 +1,6 @@
 """Notification Channel Senders: Multi-channel delivery adapters (Phase 12-A + 13-B)."""
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
@@ -9,7 +10,7 @@ import urllib.error
 import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable, Tuple
 
 from .models import Notification
 from .card_formatters import (
@@ -21,6 +22,29 @@ from .card_formatters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _retry_urlopen(
+    req: urllib.request.Request,
+    timeout: float,
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 5.0,
+) -> Tuple[Any, bool]:
+    """Retry urllib.request.urlopen with exponential backoff."""
+    last_exception = None
+    delay = base_delay
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp, True
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_exception = exc
+            if attempt == max_attempts:
+                break
+            time.sleep(delay)
+            delay = min(delay * 2.0, max_delay)
+    raise last_exception  # type: ignore[misc]
 
 
 @dataclass
@@ -100,7 +124,8 @@ class WebhookSender(BaseChannelSender):
 
         req = urllib.request.Request(self.webhook_url, data=data, headers=self.headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 status = resp.getcode()
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
@@ -131,7 +156,8 @@ class SlackSender(WebhookSender):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 status = resp.getcode()
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
@@ -162,7 +188,8 @@ class LarkSender(WebhookSender):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 status = resp.getcode()
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
@@ -193,7 +220,8 @@ class DingTalkSender(WebhookSender):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 status = resp.getcode()
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= status < 300, status_code=status, response_body=body)
@@ -316,7 +344,8 @@ class TelegramSender(BaseChannelSender):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
         except urllib.error.HTTPError as exc:
@@ -368,7 +397,8 @@ class DiscordSender(BaseChannelSender):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            resp_ctx, _ = _retry_urlopen(req, timeout=self.timeout)
+            with resp_ctx as resp:
                 body = resp.read().decode("utf-8")
                 return DeliveryResult(success=200 <= resp.getcode() < 300, status_code=resp.getcode(), response_body=body)
         except urllib.error.HTTPError as exc:

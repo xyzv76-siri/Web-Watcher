@@ -1,13 +1,40 @@
-"""HTTP fetcher with polite caching and timeout handling."""
+"""HTTP fetcher with polite caching, timeout handling, and retry support."""
 
+import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable, Type
 import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError, HTTPError
 
 from .fetch import FetchResult, FetchStatus
 
 RequestError = RequestException
+
+
+def retry(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 10.0,
+    backoff_factor: float = 2.0,
+    retryable_exceptions: tuple = (Timeout, ConnectionError),
+) -> Callable:
+    """Retry decorator with exponential backoff for network operations."""
+    def decorator(func: Callable) -> Callable:
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            delay = base_delay
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as exc:
+                    last_exception = exc
+                    if attempt == max_attempts:
+                        break
+                    time.sleep(delay)
+                    delay = min(delay * backoff_factor, max_delay)
+            raise last_exception  # type: ignore[misc]
+        return wrapper
+    return decorator
 
 
 def _fetch_with_playwright(
@@ -150,7 +177,11 @@ class SmartFetcher:
             request_kwargs["proxies"] = {"http": proxy, "https": proxy}
 
         try:
-            response = self.session.get(url, **request_kwargs)
+            @retry(max_attempts=3, base_delay=1.0, max_delay=5.0, retryable_exceptions=(Timeout, ConnectionError))
+            def _do_request():
+                return self.session.get(url, **request_kwargs)
+
+            response = _do_request()
 
             status_code = response.status_code
             redirect_url = response.headers.get("Location") if status_code in (301, 302, 303, 307, 308) else None

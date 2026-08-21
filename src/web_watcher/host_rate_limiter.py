@@ -25,6 +25,11 @@ class HostRateLimiter:
             raise RuntimeError("HostRateLimiter requires a Repository for cross-process safety")
         self._repository = repository
         self._active_claims: Dict[str, str] = {}  # host -> claim_token
+        # Startup reaping: clear stale claims from previous process instances.
+        try:
+            self._repository.reap_stale_claims(older_than=datetime.now(timezone.utc))
+        except (sqlite3.Error, AttributeError, TypeError):
+            pass
 
     def prepare_request(
         self,
